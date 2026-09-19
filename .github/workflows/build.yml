@@ -362,6 +362,217 @@ jobs:
           path: Pawmmit*.AppImage
           name: PawmmitAppImage
 
+  # Runs the packaged app on a fresh runner that never had Qt or the build
+  # dependencies installed, so anything the package failed to bundle is missing.
+  smoke-test:
+    name: Smoke test (${{ matrix.env.name }})
+    needs: build
+    runs-on: ${{ matrix.env.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - name: macos
+            os: macos-15
+          - name: win64
+            os: windows-latest
+
+    steps:
+      - name: Download package
+        uses: actions/download-artifact@v6
+        with:
+          name: Pawmmit ${{ matrix.env.name }}
+          path: package
+
+      - name: Check the runner is clean (macOS)
+        if: matrix.env.name == 'macos'
+        run: |
+          clean=1
+          for formula in libgit2 qt qt@6; do
+            if brew list --versions "$formula" >/dev/null 2>&1; then
+              echo "::error::$formula is installed"
+              clean=0
+            fi
+          done
+          for tool in qmake6 macdeployqt6; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::$tool is on PATH"
+              clean=0
+            fi
+          done
+          if env | grep -E '^(QT|Qt)[A-Za-z0-9_]*=' >/dev/null; then
+            echo "::error::Qt environment variables are set"
+            clean=0
+          fi
+          [ "$clean" = 1 ]
+
+      - name: Check the runner is clean (Windows)
+        if: matrix.env.name == 'win64'
+        shell: pwsh
+        run: |
+          $problems = @()
+          foreach ($name in 'qmake6.exe', 'windeployqt6.exe', 'Qt6Core.dll', 'git2.dll') {
+            where.exe /Q $name 2>$null
+            if ($LASTEXITCODE -eq 0) { $problems += "$name is on PATH" }
+          }
+          if (Test-Path "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin\git2.dll") {
+            $problems += "vcpkg has git2.dll installed"
+          }
+          foreach ($name in 'Qt6_DIR', 'QT_ROOT_DIR', 'QT_PLUGIN_PATH') {
+            if (Test-Path "Env:$name") { $problems += "$name is set" }
+          }
+          if ($problems) {
+            $problems | ForEach-Object { Write-Host "::error::$_" }
+            exit 1
+          }
+
+      - name: Install (macOS)
+        if: matrix.env.name == 'macos'
+        run: |
+          dmg="$(ls package/Pawmmit-*.dmg | head -n1)"
+          echo "Installing $dmg"
+          mkdir -p "$RUNNER_TEMP/dmg"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$RUNNER_TEMP/dmg"
+          app="$(find "$RUNNER_TEMP/dmg" -maxdepth 2 -name '*.app' -print -quit)"
+          if [ -z "$app" ]; then
+            echo "::error::The disk image contains no .app; its top level is:"
+            ls -la "$RUNNER_TEMP/dmg"
+            exit 1
+          fi
+          cp -R "$app" "$RUNNER_TEMP/Pawmmit.app"
+          hdiutil detach "$RUNNER_TEMP/dmg"
+          echo "APP=$RUNNER_TEMP/Pawmmit.app" >> "$GITHUB_ENV"
+
+      - name: Install (Windows)
+        if: matrix.env.name == 'win64'
+        shell: pwsh
+        run: |
+          $installer = (Get-ChildItem package\Pawmmit-win64-*.exe | Select-Object -First 1).FullName
+          $dir = Join-Path $env:RUNNER_TEMP 'Pawmmit'
+          Write-Host "Installing $installer"
+          # NSIS wants /D last and unquoted.
+          $p = Start-Process -FilePath $installer -ArgumentList '/S', "/D=$dir" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Installer exited with code $($p.ExitCode)" }
+          "APP_DIR=$dir" >> $env:GITHUB_ENV
+
+      - name: Run (macOS)
+        if: matrix.env.name == 'macos'
+        run: |
+          # Uses the real Cocoa platform plugin rather than offscreen, so a
+          # bundle missing it fails here.
+          test -f "$APP/Contents/PlugIns/platforms/libqcocoa.dylib"
+          output="$("$APP/Contents/MacOS/pawmmit" --version)"
+          echo "$output"
+          case "$output" in
+            Pawmmit*) ;;
+            *) echo "::error::Unexpected --version output"; exit 1 ;;
+          esac
+
+      - name: Run (Windows)
+        if: matrix.env.name == 'win64'
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:APP_DIR 'bin\pawmmit.exe'
+          if (-not (Test-Path (Join-Path $env:APP_DIR 'bin\platforms\qwindows.dll'))) {
+            throw "qwindows.dll is missing from the install"
+          }
+          # Only the system directories, so the app has to bring its own DLLs.
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          # A GUI app has no console to print --version to, so start it, give
+          # it time to fail, and stop it if it's still running.
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 10
+          if ($p.HasExited) {
+            throw ("pawmmit.exe exited early with code 0x{0:X} (0xC0000135 means a DLL is missing)" -f $p.ExitCode)
+          }
+          Stop-Process -Id $p.Id -Force
+
+      - name: Show bundle details (macOS)
+        if: failure() && matrix.env.name == 'macos'
+        run: |
+          app="${APP:-}"
+          [ -n "$app" ] || exit 0
+          ls "$app/Contents" "$app/Contents/Frameworks" "$app/Contents/PlugIns" || true
+          otool -L "$app/Contents/MacOS/pawmmit" || true
+
+      - name: Show install details (Windows)
+        if: failure() && matrix.env.name == 'win64'
+        shell: pwsh
+        run: |
+          if ($env:APP_DIR) { Get-ChildItem -Recurse -Depth 1 $env:APP_DIR | Select-Object -First 200 FullName }
+
+  # Runs the AppImage in bare containers of older distributions, which have no
+  # Qt and a much older glibc than the build machine, with only the basic
+  # desktop libraries that AppImages are expected to find on the host.
+  smoke-test-appimage:
+    name: Smoke test (AppImage on ${{ matrix.image }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ubuntu:22.04
+          - debian:12
+
+    steps:
+      - name: Download AppImage
+        uses: actions/download-artifact@v6
+        with:
+          name: PawmmitAppImage
+          path: package
+
+      - name: Run
+        run: |
+          docker run --rm -i \
+            -v "$PWD/package:/package:ro" \
+            ${{ matrix.image }} bash -eu <<'EOF'
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq xvfb fontconfig libgl1 libegl1 libglib2.0-0 \
+            libdbus-1-3 libxkbcommon0 >/dev/null
+
+          # Nothing of the app's own dependencies may be on the system.
+          if ldconfig -p | grep -E 'libQt6Core|libgit2'; then
+            echo "::error::Qt or libgit2 is installed in the container"
+            exit 1
+          fi
+          ldd --version | head -n1
+
+          diagnose() {
+            echo "--- libraries the app can't find"
+            cd /tmp
+            ./pawmmit.AppImage --appimage-extract >/dev/null 2>&1 || true
+            ldd squashfs-root/usr/bin/pawmmit 2>&1 | grep -i 'not found' || true
+          }
+          trap diagnose ERR
+
+          # AppImages are not executable after a download, and there is no FUSE
+          # in the container, so unpack it on the fly.
+          cp /package/Pawmmit*.AppImage /tmp/pawmmit.AppImage
+          chmod +x /tmp/pawmmit.AppImage
+          export APPIMAGE_EXTRACT_AND_RUN=1
+
+          expect_version() {
+            case "$1" in
+              Pawmmit*) ;;
+              *) echo "::error::Unexpected --version output: $1"; exit 1 ;;
+            esac
+          }
+
+          echo "--- offscreen platform"
+          out="$(QT_QPA_PLATFORM=offscreen /tmp/pawmmit.AppImage --version)"
+          echo "$out"
+          expect_version "$out"
+
+          echo "--- xcb platform"
+          out="$(xvfb-run -a /tmp/pawmmit.AppImage --version)"
+          echo "$out"
+          expect_version "$out"
+          EOF
+
   publish:
     needs: [flatpak, build]
     runs-on: ubuntu-latest
