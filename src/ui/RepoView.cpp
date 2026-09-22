@@ -471,6 +471,10 @@ void RepoView::diffSelected(const git::Diff diff, const QString &file,
 }
 
 RepoView::~RepoView() {
+  // Set first: a child losing focus here can synchronously trigger
+  // MenuBar::update(), which checks this before querying our children.
+  mDestroying = true;
+
   // No processEvents(): it can dispatch a queued signal into a parent
   // whose destructor already ran.
   cancelBackgroundTasks(false);

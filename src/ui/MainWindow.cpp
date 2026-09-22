@@ -307,7 +307,10 @@ RepoView *MainWindow::addTab(const git::Repository &repo) {
 int MainWindow::count() const { return tabWidget()->count(); }
 
 RepoView *MainWindow::currentView() const {
-  return static_cast<RepoView *>(tabWidget()->currentWidget());
+  auto *view = static_cast<RepoView *>(tabWidget()->currentWidget());
+  // Hide a view that's tearing down, since a focus change during its own
+  // destruction can reach here before it's removed as the current tab.
+  return (view && view->isDestroying()) ? nullptr : view;
 }
 
 RepoView *MainWindow::view(int index) const {
