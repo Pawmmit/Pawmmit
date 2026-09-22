@@ -89,6 +89,9 @@ jobs:
 
   build:
     runs-on: ${{ matrix.env.os }}
+    permissions:
+      contents: read
+      pull-requests: write
     strategy:
       fail-fast: false
       matrix:
@@ -125,12 +128,16 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: ${{ matrix.env.name == 'linux' && 0 || 1 }}
 
       - name: Install build tools
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install "meson>=1.4" ninja
+      - run: pip install gcovr diff-cover
+        if: matrix.env.name == 'linux'
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4.3.0
@@ -235,7 +242,7 @@ jobs:
             -Dci_tests=true \
             -Dupdate_translations=true \
             ${DEV_BUILD:+-Ddev_build="$DEV_BUILD"} \
-            $( [ "${{ matrix.env.name }}" = "linux" ] && echo -Dbundled=true )
+            $( [ "${{ matrix.env.name }}" = "linux" ] && echo "-Dbundled=true -Db_coverage=true" )
 
       - name: Build
         run: meson compile -C build
@@ -251,6 +258,55 @@ jobs:
       - name: Test (macOS)
         if: matrix.env.name == 'macos'
         run: meson test -C build --print-errorlogs
+
+      - name: Generate coverage reports
+        if: matrix.env.name == 'linux'
+        run: |
+          mkdir coverage
+          gcovr -r . build -e subprojects -e test \
+            --xml coverage/coverage.xml \
+            --html-details coverage/index.html \
+            --txt-summary | tee coverage/summary.txt
+
+      - name: Write coverage summary
+        if: matrix.env.name == 'linux'
+        run: |
+          {
+            echo "### Test coverage"
+            echo '```'
+            cat coverage/summary.txt
+            echo '```'
+          } > report.md
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            diff-cover coverage/coverage.xml \
+              --compare-branch="origin/${{ github.base_ref }}" \
+              --format markdown:patch.md,json:patch.json
+            {
+              echo
+              echo "**Coverage of lines changed in this PR: $(jq .total_percent_covered patch.json)%**"
+              echo
+              echo "<details><summary>Uncovered changed lines</summary>"
+              echo
+              cat patch.md
+              echo
+              echo "</details>"
+            } >> report.md
+          fi
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on pull request
+        if: matrix.env.name == 'linux' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: coverage
+          path: report.md
+
+      - name: Upload HTML coverage report
+        if: matrix.env.name == 'linux'
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-report
+          path: coverage/
 
       - name: Package (macOS / Windows)
         if: matrix.env.pack == 1
