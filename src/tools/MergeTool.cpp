@@ -15,12 +15,12 @@
 #include "git/Config.h"
 #include "git/Index.h"
 #include "git/Repository.h"
+#include "platform/HostProcess.h"
 #include "util/Path.h"
 #include "Debug.h"
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
-#include <QProcess>
 #include <QTemporaryFile>
 
 MergeTool::MergeTool(const QString &file, const git::Blob &localBlob,
@@ -81,12 +81,13 @@ bool MergeTool::start() {
   }
 
   // Destroy this after process finishes.
-  QProcess *process = new QProcess(this);
+  auto *process = new platform::HostProcess(this);
   process->setProcessChannelMode(
       QProcess::ProcessChannelMode::ForwardedChannels);
   git::Repository repo = mLocalBlob.repo();
   auto signal = QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished);
-  QObject::connect(process, signal, [this, repo, backupPath, process] {
+  const QProcess *sender = &process->process();
+  QObject::connect(sender, signal, [this, repo, backupPath, process] {
     Debug("Merge Process Exited!");
     Debug("Stdout: " << process->readAllStandardOutput());
     Debug("Stderr: " << process->readAllStandardError());
@@ -106,44 +107,31 @@ bool MergeTool::start() {
     deleteLater();
   });
 
-  QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-  env.insert("LOCAL", local->fileName());
-  env.insert("REMOTE", remote->fileName());
-  env.insert("MERGED", mFile);
-  env.insert("BASE", basePath);
-  process->setProcessEnvironment(env);
+  QProcessEnvironment vars;
+  vars.insert("LOCAL", local->fileName());
+  vars.insert("REMOTE", remote->fileName());
+  vars.insert("MERGED", util::sandboxPathToHost(mFile));
+  vars.insert("BASE", basePath);
+  for (const QString &name : vars.keys())
+    process->insertEnvironment(name, vars.value(name));
 
-#if defined(FLATPAK) || defined(DEBUG_FLATPAK)
-  // Resolve potentially sandboxed path
-  const QString hostMerged = util::sandboxPathToHost(mFile);
-  QStringList arguments = {"--host", "--env=LOCAL=" + local->fileName(),
-                           "--env=REMOTE=" + remote->fileName(),
-                           "--env=MERGED=" + hostMerged,
-                           "--env=BASE=" + basePath};
-  arguments.append("sh");
-  arguments.append("-c");
-  arguments.append(command);
-  // Debug("Command: " << "flatpak-spawn");
-  process->start("flatpak-spawn", arguments);
-  // Debug("QProcess Arguments: " << process->arguments());
-  if (!process->waitForStarted()) {
-    Debug("MergeTool starting failed");
-    return false;
-  }
-#else
-  QString bash = git::Command::bashPath();
-  if (!bash.isEmpty()) {
+  if (platform::HostProcess::isSandboxed()) {
+    process->start("sh", {"-c", command});
+  } else if (QString bash = git::Command::bashPath(); !bash.isEmpty()) {
     process->start(bash, {"-c", command});
   } else if (!shell) {
-    process->start(git::Command::substitute(env, command), QStringList());
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert(vars);
+    process->start(git::Command::substitute(env, command));
   } else {
     emit error(BashNotFound);
     return false;
   }
 
-  if (!process->waitForStarted())
+  if (!process->waitForStarted()) {
+    Debug("MergeTool starting failed");
     return false;
-#endif
+  }
 
   // Detach from parent.
   setParent(nullptr);

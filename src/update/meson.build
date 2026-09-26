@@ -15,7 +15,7 @@ update_src = files(
     'UpToDateDialog.cpp',
 )
 
-update_deps = [pawmmit_common, conf_dep, git_dep, cmark_dep]
+update_deps = [pawmmit_common, pawmmitUtil_dep, conf_dep, git_dep, cmark_dep, platform_dep]
 
 if is_mac
     update_src += files('Updater_mac.mm')

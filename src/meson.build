@@ -1,9 +1,7 @@
-pawmmit_common = declare_dependency(
-    include_directories: include_directories('.'),
-    dependencies: qt6_dep
-)
+pawmmit_common = declare_dependency(include_directories: include_directories('.'), dependencies: qt6_dep)
 
 subdir('util')
+subdir('platform')
 subdir('cli')
 subdir('conf')
 subdir('git')

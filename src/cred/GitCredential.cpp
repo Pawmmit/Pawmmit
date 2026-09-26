@@ -12,6 +12,7 @@
 
 #include "GitCredential.h"
 #include "qtsupport.h"
+#include "platform/GitInstall.h"
 #include <QStandardPaths>
 #include <QCoreApplication>
 #include <QDir>
@@ -113,30 +114,16 @@ QString GitCredential::command() const {
     return candidate;
   }
 
-#ifdef Q_OS_WIN
-  // Look for GIT CLI installation path
-  QString gitPath = QStandardPaths::findExecutable("git");
-  if (!gitPath.isEmpty()) {
-    QDir gitDir = QFileInfo(gitPath).dir();
-    if (gitDir.dirName() == "cmd" || gitDir.dirName() == "bin") {
-      gitDir.cdUp();
-
-#ifdef Q_OS_WIN64
-      gitDir.cd("mingw64");
-#else
-      gitDir.cd("mingw32");
-#endif
-
-      gitDir.cd("bin");
-
-      candidate =
-          QStandardPaths::findExecutable(name, QStringList(gitDir.path()));
-      if (!candidate.isEmpty()) {
-        return candidate;
-      }
+  // Look in the helpers bundled with Git for Windows.
+  QString gitDir = platform::gitInstallDir();
+  if (!gitDir.isEmpty()) {
+    QDir dir(gitDir);
+    candidate = QStandardPaths::findExecutable(
+        name, {dir.filePath("mingw64/bin"), dir.filePath("mingw32/bin")});
+    if (!candidate.isEmpty()) {
+      return candidate;
     }
   }
-#endif
 
   return name;
 }

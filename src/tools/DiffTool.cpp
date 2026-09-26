@@ -13,8 +13,8 @@
 #include "DiffTool.h"
 #include "git/Command.h"
 #include "git/Repository.h"
+#include "platform/HostProcess.h"
 #include "util/Path.h"
-#include <QProcess>
 #include <QTemporaryFile>
 #include <QDebug>
 
@@ -71,11 +71,12 @@ bool DiffTool::start() {
   }
 
   // Destroy this after process finishes.
-  QProcess *process = new QProcess(this);
+  auto *process = new platform::HostProcess(this);
   process->setProcessChannelMode(
       QProcess::ProcessChannelMode::ForwardedChannels);
   auto signal = QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished);
-  QObject::connect(process, signal, [this, process] {
+  const QProcess *sender = &process->process();
+  QObject::connect(sender, signal, [this, process] {
     qDebug() << "Merge Process Exited!";
     qDebug() << "Stdout: " << process->readAllStandardOutput();
     qDebug() << "Stderr: " << process->readAllStandardError();
@@ -84,38 +85,27 @@ bool DiffTool::start() {
 
   QString localPath =
       local ? local->fileName() : QFileInfo(mFile).absoluteFilePath();
-#if defined(FLATPAK) || defined(DEBUG_FLATPAK)
-  // Resolve potentially sandboxed path
-  const QString hostLocal = util::sandboxPathToHost(localPath);
-  const QString hostRemote = util::sandboxPathToHost(remotePath);
   const QString hostMerged = util::sandboxPathToHost(mFile);
-  QStringList arguments = {"--host", QStringLiteral("--env=LOCAL=") + hostLocal,
-                           "--env=REMOTE=" + hostRemote,
-                           "--env=MERGED=" + hostMerged,
-                           "--env=BASE=" + hostMerged};
-  arguments.append("sh");
-  arguments.append("-c");
-  arguments.append(command);
-  process->start("flatpak-spawn", arguments);
-#else
+  QProcessEnvironment vars;
+  vars.insert("LOCAL", util::sandboxPathToHost(localPath));
+  vars.insert("REMOTE", util::sandboxPathToHost(remotePath));
+  vars.insert("MERGED", hostMerged);
+  vars.insert("BASE", hostMerged);
+  for (const QString &name : vars.keys())
+    process->insertEnvironment(name, vars.value(name));
 
-  QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-  env.insert("LOCAL", localPath);
-  env.insert("REMOTE", remotePath);
-  env.insert("MERGED", mFile);
-  env.insert("BASE", mFile);
-  process->setProcessEnvironment(env);
-
-  QString bash = git::Command::bashPath();
-  if (!bash.isEmpty()) {
+  if (platform::HostProcess::isSandboxed()) {
+    process->start("sh", {"-c", command});
+  } else if (QString bash = git::Command::bashPath(); !bash.isEmpty()) {
     process->start(bash, {"-c", command});
   } else if (!shell) {
-    process->start(git::Command::substitute(env, command), QStringList());
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert(vars);
+    process->start(git::Command::substitute(env, command));
   } else {
     emit error(BashNotFound);
     return false;
   }
-#endif
 
   if (!process->waitForStarted()) {
     qDebug() << "DiffTool starting failed";

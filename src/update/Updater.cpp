@@ -17,7 +17,8 @@
 #include "UpToDateDialog.h"
 #include "conf/Settings.h"
 #include "ui/MainWindow.h"
-#include "git/Command.h"
+#include "platform/HostProcess.h"
+#include "util/Path.h"
 #include "Debug.h"
 #include <QApplication>
 #include <QCloseEvent>
@@ -290,64 +291,58 @@ Updater *Updater::instance() {
 
 #if defined(FLATPAK) || defined(DEBUG_FLATPAK)
 bool Updater::uninstallPawmmit(bool system) {
-  QString bash = git::Command::bashPath();
   QString loc = system ? "--system" : "--user";
 
-  QStringList args;
-  args.append("-c");
-  args.append(QString("flatpak-spawn --host flatpak remove -y %1 "
-                      "com.github.Pawmmit.Pawmmit")
-                  .arg(loc));
-  auto *p = new QProcess(this);
-
-  p->start(bash, args);
-  if (!p->waitForFinished()) {
-    const QString es = p->errorString();
-    qDebug() << "Uninstalling Pawmmit failed: " + es;
+  platform::HostProcess p;
+  p.start("flatpak", {"remove", "-y", loc, "com.github.Pawmmit.Pawmmit"});
+  if (!p.waitForFinished()) {
+    qDebug() << "Uninstalling Pawmmit failed: " + p.process().errorString();
     return false;
-  } else {
-    qDebug() << "Uninstall: " + p->readAll();
   }
-  p->deleteLater();
-  return true;
+
+  qDebug() << "Uninstall: " + p.readAllStandardOutput();
+  return p.process().exitCode() == 0;
 }
 
 bool Updater::install(const DownloadRef &download, QString &error) {
-  QString path = download->file()->fileName();
+  QString path = util::sandboxPathToHost(download->file()->fileName());
 
   // Ignore return value
   uninstallPawmmit(true);
   uninstallPawmmit(false);
 
   QDir dir(QCoreApplication::applicationDirPath());
-  QStringList args;
-  args.append("-c");
-  args.append(
-      QString("flatpak-spawn --host flatpak install --user -y %1").arg(path));
-  Debug("Install arguments: " << args);
   Debug("Download file: " << path);
-  QProcess *p = new QProcess(this);
 
-  QString bash = git::Command::bashPath();
-  Debug("Bash: " << bash);
-  p->start(bash, args);
-  if (!p->waitForFinished()) {
-    const QString es = p->errorString();
+  platform::HostProcess p;
+  p.start("flatpak", {"install", "--user", "-y", path});
+  if (!p.waitForFinished()) {
+    const QString es = p.process().errorString();
     error = tr("Installer script failed: %1").arg(es);
     Debug("Installer script failed: " + es);
     return false;
-  } else {
-    Debug("Successfully installed bundle: " + p->readAll());
   }
-  p->deleteLater();
+
+  if (int code = p.process().exitCode()) {
+    error = tr("Installer script failed: %1").arg(code);
+    Debug("Installer script failed: " << p.readAllStandardError());
+    return false;
+  }
+
+  Debug("Successfully installed bundle: " + p.readAllStandardOutput());
 
   auto relauncher_cmd = dir.filePath("pawmmit-relauncher");
   Debug("Relauncher command: " << relauncher_cmd);
 
   // Start the relaunch helper.
-  QString app = "flatpak-spawn --host flatpak run com.github.Pawmmit.Pawmmit";
   QString pid = QString::number(QCoreApplication::applicationPid());
-  if (!QProcess::startDetached(relauncher_cmd, {app, pid})) {
+  QStringList relaunchArgs = {"flatpak-spawn",
+                              "--host",
+                              "flatpak",
+                              "run",
+                              "com.github.Pawmmit.Pawmmit",
+                              pid};
+  if (!QProcess::startDetached(relauncher_cmd, relaunchArgs)) {
     error = tr("Helper application failed to start");
     return false;
   }

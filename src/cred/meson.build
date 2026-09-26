@@ -13,7 +13,7 @@ cred_moc = qt6.preprocess(
 cred_lib = static_library(
     'cred',
     cred_src + cred_moc,
-    dependencies: [pawmmit_common, conf_dep, git_dep])
+    dependencies: [pawmmit_common, conf_dep, git_dep, platform_dep])
 
 cred_dep = declare_dependency(
     link_with: cred_lib,

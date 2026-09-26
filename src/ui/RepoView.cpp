@@ -55,8 +55,8 @@
 #include "index/Index.h"
 #include "log/LogEntry.h"
 #include "log/LogView.h"
+#include "platform/Terminal.h"
 #include "tools/ShowTool.h"
-#include "util/Path.h"
 #include "watcher/RepositoryWatcher.h"
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -74,11 +74,6 @@
 #include <QUrlQuery>
 #include <QVBoxLayout>
 #include <QtConcurrent>
-
-#if defined(Q_OS_WIN)
-#include <Windows.h>
-#include <memory>
-#endif
 
 namespace {
 
@@ -2986,110 +2981,8 @@ void RepoView::openTerminal() {
   QString terminalCmd =
       Settings::instance()->value(Setting::Id::TerminalCommand).toString();
 
-  if (terminalCmd.isEmpty()) {
-#if defined(Q_OS_WIN)
-    static QString detectedTerminal = nullptr;
-
-    if (detectedTerminal.isNull()) {
-      detectedTerminal = "";
-
-      QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-      QString programFilesDir = env.value("PROGRAMFILES");
-      QString programFiles32Dir = env.value("PROGRAMFILES(x86)");
-
-      QStringList candidates;
-
-      candidates.append("git-bash");
-      if (!programFilesDir.isEmpty())
-        candidates.append(programFilesDir + "/Git/git-bash.exe");
-      if (!programFiles32Dir.isEmpty())
-        candidates.append(programFiles32Dir + "/Git/git-bash.exe");
-      if (!programFilesDir.isEmpty())
-        candidates.append(programFilesDir + "/Git/bin/bash.exe");
-      if (!programFiles32Dir.isEmpty())
-        candidates.append(programFiles32Dir + "/Git/bin/bash.exe");
-      candidates.append("cmd");
-
-      for (QString candidate : candidates) {
-        QString exePath;
-
-        if (QDir::isAbsolutePath(candidate)) {
-          if (QFile::exists(candidate))
-            exePath = candidate;
-
-        } else {
-          exePath = QStandardPaths::findExecutable(candidate);
-        }
-
-        if (!exePath.isEmpty()) {
-          detectedTerminal =
-              '"' + QDir::toNativeSeparators(exePath.replace("\"", "\"\"")) +
-              '"';
-          break;
-        }
-      }
-    }
-
-    terminalCmd = detectedTerminal;
-
-#elif defined(Q_OS_MACOS)
-    static QString detectedTerminal = nullptr;
-    static const char *candidates[] = {"com.googlecode.iterm2",
-                                       "com.apple.Terminal", nullptr};
-
-    if (detectedTerminal.isNull()) {
-      detectedTerminal = "";
-
-      for (const char **candidate = candidates; *candidate; ++candidate) {
-        int res = QProcess::execute(
-            "osascript", {"-e", QString("tell application \"Finder\" to get "
-                                        "application file id \"%1\"")
-                                    .arg(*candidate)});
-
-        if (res == 0) {
-          detectedTerminal = QString("open -b %1").arg(*candidate) + " .";
-          break;
-        }
-      }
-    }
-
-    terminalCmd = detectedTerminal;
-
-#elif defined(Q_OS_UNIX)
-    static QString detectedTerminal = nullptr;
-    static const QStringList candidates = {
-        "x-terminal-emulator", "xdg-terminal", "i3-sensible-terminal",
-        "gnome-terminal",      "konsole",      "xterm",
-    };
-
-    if (detectedTerminal.isNull()) {
-      detectedTerminal = "";
-
-      for (auto candidate : candidates) {
-#if defined(FLATPAK)
-        // There is no graphical terminal in the flatpak environment. Use the
-        // host terminal
-        QProcess process;
-        process.start("flatpak-spawn", {"--host", "which", candidate});
-        process.waitForFinished(-1); // will wait forever until finished
-        if (!process.readAllStandardOutput().isEmpty()) {
-          detectedTerminal = candidate;
-          break;
-        }
-#else
-        QString exePath = QStandardPaths::findExecutable(candidate);
-        if (!exePath.isEmpty()) {
-          detectedTerminal =
-              '"' + exePath.replace("\\", "\\\\").replace("\"", "\\\"") + '"';
-          break;
-        }
-#endif
-      }
-    }
-
-    terminalCmd = detectedTerminal;
-#endif
-  }
+  if (terminalCmd.isEmpty())
+    terminalCmd = platform::defaultTerminalCommand();
 
   if (terminalCmd.isEmpty()) {
     auto messagebox = new QMessageBox(this);
@@ -3112,47 +3005,7 @@ void RepoView::openTerminal() {
     return;
   }
 
-#if defined(Q_OS_WIN)
-  // No direct method of QProcess can take a raw command line and a working
-  // directory So we call CreateProcessW() directly
-
-  std::unique_ptr<wchar_t[]> cmdBuffer(new wchar_t[terminalCmd.length() + 1]);
-  int len = terminalCmd.toWCharArray(cmdBuffer.get());
-  cmdBuffer[len] = L'\0';
-
-  STARTUPINFOW startupInfo;
-  PROCESS_INFORMATION processInfo;
-
-  ZeroMemory(&startupInfo, sizeof(STARTUPINFOW));
-  ZeroMemory(&processInfo, sizeof(PROCESS_INFORMATION));
-
-  bool success = CreateProcessW(
-      nullptr, cmdBuffer.get(), nullptr, nullptr, FALSE, CREATE_NEW_CONSOLE,
-      nullptr,
-      (LPCWSTR)QDir::toNativeSeparators(mRepo.workdir().absolutePath()).utf16(),
-      &startupInfo, &processInfo);
-
-  if (!success)
-    return;
-
-  CloseHandle(processInfo.hProcess);
-  CloseHandle(processInfo.hThread);
-
-#elif defined(Q_OS_UNIX)
-
-  QProcess child;
-#if defined(FLATPAK)
-  child.setProgram("flatpak-spawn");
-  child.setArguments(QStringList() << "--host" << terminalCmd);
-#else
-  child.setProgram("sh");
-  child.setArguments(QStringList() << "-c" << terminalCmd);
-#endif
-  child.setWorkingDirectory(
-      util::sandboxPathToHost(mRepo.workdir().absolutePath()));
-  Debug("Execute Terminal: Arguments: " << child.arguments());
-  child.startDetached();
-#endif
+  platform::openTerminal(terminalCmd, mRepo.workdir().absolutePath());
 }
 
 void RepoView::openFileManager() {
