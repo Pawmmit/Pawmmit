@@ -30,6 +30,7 @@ public:
   void start(const QString &program, const QStringList &arguments = {});
   bool startDetached(const QString &program, const QStringList &arguments = {});
   bool waitForStarted(int msecs = 30000);
+  bool waitForFinished(int msecs = 30000);
 
   QByteArray readAllStandardOutput();
   QByteArray readAllStandardError();

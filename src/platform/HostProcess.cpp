@@ -78,6 +78,10 @@ bool HostProcess::waitForStarted(int msecs) {
   return mProcess.waitForStarted(msecs);
 }
 
+bool HostProcess::waitForFinished(int msecs) {
+  return mProcess.waitForFinished(msecs);
+}
+
 QByteArray HostProcess::readAllStandardOutput() {
   return mProcess.readAllStandardOutput();
 }
