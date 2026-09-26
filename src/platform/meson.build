@@ -1,5 +1,11 @@
+terminal_impl = {
+    'darwin': 'Terminal_mac.cpp',
+    'windows': 'Terminal_win.cpp',
+}.get(host_machine.system(), 'Terminal_unix.cpp')
+
 platform_src = [
     'HostProcess.cpp',
+    terminal_impl,
 ]
 
 platform_lib = static_library('platform', platform_src, dependencies: [pawmmit_common, pawmmitUtil_dep])
