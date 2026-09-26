@@ -25,16 +25,19 @@
 
 namespace {
 
-QString fileManagerCommand() {
-  QString command =
-      Settings::instance()->value(Setting::Id::FilemanagerCommand).toString();
-  return !command.isEmpty() ? command : platform::defaultFileManagerCommand();
+QString configuredFileManagerCommand() {
+  return Settings::instance()
+      ->value(Setting::Id::FilemanagerCommand)
+      .toString();
 }
 
 } // namespace
 
 bool ShowTool::openFileManager(QString path) {
-  return platform::openFileManager(fileManagerCommand(), path);
+  QString command = configuredFileManagerCommand();
+  if (command.isEmpty())
+    command = platform::defaultFileManagerCommand();
+  return platform::openFileManager(command, path);
 }
 
 ShowTool::ShowTool(const QString &file, QObject *parent)
@@ -45,5 +48,5 @@ ExternalTool::Kind ShowTool::kind() const { return Show; }
 QString ShowTool::name() const { return tr("Show in %1").arg(tr(NAME)); }
 
 bool ShowTool::start() {
-  return platform::revealInFileManager(mFile, fileManagerCommand());
+  return platform::revealInFileManager(mFile, configuredFileManagerCommand());
 }

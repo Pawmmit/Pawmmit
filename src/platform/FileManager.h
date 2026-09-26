@@ -21,7 +21,7 @@ bool openFileManager(const QString &command, const QString &path);
 
 /// @brief Show a file selected in the file manager
 /// @param file File or directory to show
-/// @param command File manager command, used where selecting isn't supported
+/// @param command Configured file manager command, or empty for the default
 /// @return Whether it could be started
 bool revealInFileManager(const QString &file, const QString &command);
 
