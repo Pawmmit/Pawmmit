@@ -50,6 +50,7 @@
 #include "git2/sys/repository.h"
 #include "git2/sys/errors.h"
 #include "git2/attr.h"
+#include "platform/UserInfo.h"
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -58,12 +59,8 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QSysInfo>
 #include <QVector>
-
-#ifdef Q_OS_UNIX
-#include <pwd.h>
-#include <unistd.h>
-#endif
 
 namespace git {
 
@@ -259,20 +256,19 @@ Signature Repository::defaultSignature(bool *fake, const QString &overrideUser,
     return res;
   }
 
-#ifdef Q_OS_UNIX
-  // Get user name.
-  passwd *pw = getpwuid(getuid());
-  name = pw->pw_gecos;
+  // Generate an identity; libgit2 rejects an empty name or email.
+  QString login = platform::userLoginName();
+  if (login.isEmpty())
+    login = "unknown";
 
-  // Create fake email address.
-  char hostname[256];
-  gethostname(hostname, sizeof(hostname));
-  email = QString("%1@%2").arg(pw->pw_name, hostname);
-#else
-  name = getenv("USERNAME");
-  QString hostname = getenv("COMPUTERNAME");
-  email = QString("%1@%2.local").arg(name, hostname);
-#endif
+  QString hostname = QSysInfo::machineHostName();
+  if (hostname.isEmpty())
+    hostname = "localhost";
+
+  name = platform::userFullName();
+  if (name.isEmpty())
+    name = login;
+  email = QString("%1@%2").arg(login, hostname);
 
   if (!overrideUser.isEmpty())
     name = overrideUser;

@@ -8,12 +8,17 @@ filemanager_impl = {
     'windows': 'FileManager_win.cpp',
 }.get(host_machine.system(), 'FileManager_unix.cpp')
 
+userinfo_impl = {
+    'windows': 'UserInfo_win.cpp',
+}.get(host_machine.system(), 'UserInfo_unix.cpp')
+
 platform_src = [
     'FileManager.cpp',
     'GitInstall.cpp',
     'HostProcess.cpp',
     filemanager_impl,
     terminal_impl,
+    userinfo_impl,
 ]
 
 platform_lib = static_library('platform', platform_src, dependencies: [pawmmit_common, pawmmitUtil_dep])
