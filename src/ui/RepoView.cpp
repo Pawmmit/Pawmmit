@@ -55,8 +55,8 @@
 #include "index/Index.h"
 #include "log/LogEntry.h"
 #include "log/LogView.h"
+#include "platform/HostProcess.h"
 #include "tools/ShowTool.h"
-#include "util/Path.h"
 #include "watcher/RepositoryWatcher.h"
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -3066,24 +3066,12 @@ void RepoView::openTerminal() {
       detectedTerminal = "";
 
       for (auto candidate : candidates) {
-#if defined(FLATPAK)
-        // There is no graphical terminal in the flatpak environment. Use the
-        // host terminal
-        QProcess process;
-        process.start("flatpak-spawn", {"--host", "which", candidate});
-        process.waitForFinished(-1); // will wait forever until finished
-        if (!process.readAllStandardOutput().isEmpty()) {
-          detectedTerminal = candidate;
-          break;
-        }
-#else
-        QString exePath = QStandardPaths::findExecutable(candidate);
+        QString exePath = platform::HostProcess::findExecutable(candidate);
         if (!exePath.isEmpty()) {
           detectedTerminal =
               '"' + exePath.replace("\\", "\\\\").replace("\"", "\\\"") + '"';
           break;
         }
-#endif
       }
     }
 
@@ -3139,19 +3127,10 @@ void RepoView::openTerminal() {
   CloseHandle(processInfo.hThread);
 
 #elif defined(Q_OS_UNIX)
-
-  QProcess child;
-#if defined(FLATPAK)
-  child.setProgram("flatpak-spawn");
-  child.setArguments(QStringList() << "--host" << terminalCmd);
-#else
-  child.setProgram("sh");
-  child.setArguments(QStringList() << "-c" << terminalCmd);
-#endif
-  child.setWorkingDirectory(
-      util::sandboxPathToHost(mRepo.workdir().absolutePath()));
-  Debug("Execute Terminal: Arguments: " << child.arguments());
-  child.startDetached();
+  platform::HostProcess child;
+  child.setWorkingDirectory(mRepo.workdir().absolutePath());
+  child.startDetached("sh", {"-c", terminalCmd});
+  Debug("Execute Terminal: Arguments: " << child.process().arguments());
 #endif
 }
 

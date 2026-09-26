@@ -13,11 +13,11 @@
 #include "ShowTool.h"
 #include "conf/Settings.h"
 #include "git/Repository.h"
+#include "platform/HostProcess.h"
 #include "util/Path.h"
 #include <QDesktopServices>
 #include <QDir>
 #include <QFileInfo>
-#include <QProcess>
 #include <QUrl>
 
 #if defined(Q_OS_MAC)
@@ -51,14 +51,13 @@ bool ShowTool::openFileManager(QString path) {
   for (QString &part : cmdParts)
     part = part.arg(path);
 
-#if defined(FLATPAK)
-  QStringList arguments;
-  arguments << "--host" << cmdParts;
-  return QProcess::startDetached("flatpak-spawn", arguments);
-#else
-  QString program = cmdParts.takeFirst();
-  return QProcess::startDetached(program, cmdParts);
-#endif
+  if (cmdParts.isEmpty()) {
+    return false;
+  } else {
+    QString program = cmdParts.takeFirst();
+    platform::HostProcess process;
+    return process.startDetached(program, cmdParts);
+  }
 }
 
 ShowTool::ShowTool(const QString &file, QObject *parent)

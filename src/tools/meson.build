@@ -20,7 +20,7 @@ tools_src = files(
 tools_lib = static_library(
     'tools',
     tools_src + tools_moc,
-    dependencies: [pawmmit_common, pawmmitUtil_dep, conf_dep, git_dep],
+    dependencies: [pawmmit_common, pawmmitUtil_dep, conf_dep, git_dep, platform_dep],
 )
 
 tools_dep = declare_dependency(

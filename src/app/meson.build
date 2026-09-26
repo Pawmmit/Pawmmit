@@ -67,8 +67,7 @@ app_deps = [
 
 if is_mac
     app_src += files('Application_mac.mm', 'CustomTheme_mac.mm')
-    app_deps += dependency('appleframeworks',
-        modules: ['AppKit', 'Foundation', 'Cocoa'])
+    app_deps += dependency('appleframeworks', modules: ['AppKit', 'Foundation', 'Cocoa'])
 elif not is_win
     app_deps += dependency('qt6', modules: ['DBus'])
 endif
@@ -108,6 +107,7 @@ pawmmit_module_libs = [
     cli_lib,
     pawmmitUtil_lib,
     translation_lib,
+    platform_lib,
 ]
 pawmmit_link_deps = [
     pawmmit_common,
@@ -234,7 +234,14 @@ if not is_mac and not is_win
         input: [meson.project_source_root() / 'CHANGELOG.md', appdata_configured],
         output: 'com.github.Pawmmit.Pawmmit.appdata.xml',
         # --format text avoids appstreamcli's autodetection
-        command: [appstreamcli, 'news-to-metainfo', '--format', 'text', '@INPUT0@', '@INPUT1@', '@OUTPUT@'],
+        command: [
+            appstreamcli,
+            'news-to-metainfo',
+            '--format', 'text',
+            '@INPUT0@',
+            '@INPUT1@',
+            '@OUTPUT@',
+        ],
         build_by_default: true,
         install: true,
         install_dir: get_option('datadir') / 'metainfo',

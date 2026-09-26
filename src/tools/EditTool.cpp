@@ -13,9 +13,9 @@
 #include "EditTool.h"
 #include "git/Config.h"
 #include "git/Repository.h"
+#include "platform/HostProcess.h"
 #include "util/Path.h"
 #include <QDesktopServices>
-#include <QProcess>
 #include <QUrl>
 
 EditTool::EditTool(const QString &file, QObject *parent)
@@ -79,17 +79,12 @@ bool EditTool::start() {
   editor.remove("\"");
 
   // Destroy this after process finishes.
-  QProcess *process = new QProcess(this);
+  platform::HostProcess *process = new platform::HostProcess(this);
   auto signal = QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished);
-  QObject::connect(process, signal, this, &ExternalTool::deleteLater);
+  QObject::connect(&process->process(), signal, this,
+                   &ExternalTool::deleteLater);
 
-#if defined(FLATPAK)
-  args.prepend(editor);
-  args.prepend("--host");
-  process->start("flatpak-spawn", args);
-#else
   process->start(editor, args);
-#endif
 
   if (!process->waitForStarted())
     return false;
