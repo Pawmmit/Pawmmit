@@ -3,8 +3,15 @@ terminal_impl = {
     'windows': 'Terminal_win.cpp',
 }.get(host_machine.system(), 'Terminal_unix.cpp')
 
+filemanager_impl = {
+    'darwin': 'FileManager_mac.cpp',
+    'windows': 'FileManager_win.cpp',
+}.get(host_machine.system(), 'FileManager_unix.cpp')
+
 platform_src = [
+    'FileManager.cpp',
     'HostProcess.cpp',
+    filemanager_impl,
     terminal_impl,
 ]
 

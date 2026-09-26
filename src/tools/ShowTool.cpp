@@ -13,12 +13,7 @@
 #include "ShowTool.h"
 #include "conf/Settings.h"
 #include "git/Repository.h"
-#include "platform/HostProcess.h"
-#include "util/Path.h"
-#include <QDesktopServices>
-#include <QDir>
-#include <QFileInfo>
-#include <QUrl>
+#include "platform/FileManager.h"
 
 #if defined(Q_OS_MAC)
 #define NAME QT_TRANSLATE_NOOP("ShowTool", "Finder")
@@ -28,36 +23,18 @@
 #define NAME QT_TRANSLATE_NOOP("ShowTool", "Default File Browser")
 #endif
 
-bool ShowTool::openFileManager(QString path) {
-  QString fileManagerCmd =
+namespace {
+
+QString fileManagerCommand() {
+  QString command =
       Settings::instance()->value(Setting::Id::FilemanagerCommand).toString();
+  return !command.isEmpty() ? command : platform::defaultFileManagerCommand();
+}
 
-  if (fileManagerCmd.isEmpty()) {
-#if defined(Q_OS_WIN)
-    fileManagerCmd = "explorer \"%1\"";
+} // namespace
 
-#elif defined(Q_OS_MACOS)
-    fileManagerCmd = "open \"%1\"";
-
-#elif defined(Q_OS_UNIX)
-    fileManagerCmd = "xdg-open \"%1\"";
-#endif
-  }
-
-  QStringList cmdParts = QProcess::splitCommand(fileManagerCmd);
-  // Resolve potentially sandboxed path
-  path = QDir::toNativeSeparators(util::sandboxPathToHost(path));
-
-  for (QString &part : cmdParts)
-    part = part.arg(path);
-
-  if (cmdParts.isEmpty()) {
-    return false;
-  } else {
-    QString program = cmdParts.takeFirst();
-    platform::HostProcess process;
-    return process.startDetached(program, cmdParts);
-  }
+bool ShowTool::openFileManager(QString path) {
+  return platform::openFileManager(fileManagerCommand(), path);
 }
 
 ShowTool::ShowTool(const QString &file, QObject *parent)
@@ -68,16 +45,5 @@ ExternalTool::Kind ShowTool::kind() const { return Show; }
 QString ShowTool::name() const { return tr("Show in %1").arg(tr(NAME)); }
 
 bool ShowTool::start() {
-#if defined(Q_OS_MAC)
-  return QProcess::startDetached(
-      "/usr/bin/osascript", {"-e", "tell application \"Finder\"", "-e",
-                             QString("reveal POSIX file \"%1\"").arg(mFile),
-                             "-e", "activate", "-e", "end tell"});
-#elif defined(Q_OS_WIN)
-  return QProcess::startDetached("explorer.exe",
-                                 {"/select,", QDir::toNativeSeparators(mFile)});
-#else
-  QFileInfo info(mFile);
-  return openFileManager(info.isDir() ? info.filePath() : info.path());
-#endif
+  return platform::revealInFileManager(mFile, fileManagerCommand());
 }
