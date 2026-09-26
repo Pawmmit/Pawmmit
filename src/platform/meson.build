@@ -10,6 +10,7 @@ filemanager_impl = {
 
 platform_src = [
     'FileManager.cpp',
+    'GitInstall.cpp',
     'HostProcess.cpp',
     filemanager_impl,
     terminal_impl,

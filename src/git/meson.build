@@ -40,7 +40,7 @@ git_lib = static_library(
     'git',
     git_src + git_moc,
     cpp_args: git_public_args,
-    dependencies: [pawmmit_common, libgit2_dep, libssh2_dep, pawmmitUtil_dep])
+    dependencies: [pawmmit_common, libgit2_dep, libssh2_dep, pawmmitUtil_dep, platform_dep])
 
 git_dep = declare_dependency(
     link_with: git_lib,

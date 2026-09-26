@@ -3,9 +3,9 @@
 //
 
 #include "Terminal.h"
+#include "GitInstall.h"
 #include <QDir>
 #include <QFile>
-#include <QProcessEnvironment>
 #include <QStandardPaths>
 #include <QStringList>
 #include <Windows.h>
@@ -20,21 +20,14 @@ QString defaultTerminalCommand() {
 
   detectedTerminal = "";
 
-  QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-  QString programFilesDir = env.value("PROGRAMFILES");
-  QString programFiles32Dir = env.value("PROGRAMFILES(x86)");
-
   QStringList candidates;
 
   candidates.append("git-bash");
-  if (!programFilesDir.isEmpty())
-    candidates.append(programFilesDir + "/Git/git-bash.exe");
-  if (!programFiles32Dir.isEmpty())
-    candidates.append(programFiles32Dir + "/Git/git-bash.exe");
-  if (!programFilesDir.isEmpty())
-    candidates.append(programFilesDir + "/Git/bin/bash.exe");
-  if (!programFiles32Dir.isEmpty())
-    candidates.append(programFiles32Dir + "/Git/bin/bash.exe");
+  QString gitDir = gitInstallDir();
+  if (!gitDir.isEmpty()) {
+    candidates.append(QDir(gitDir).filePath("git-bash.exe"));
+    candidates.append(QDir(gitDir).filePath("bin/bash.exe"));
+  }
   candidates.append("cmd");
 
   for (QString candidate : candidates) {

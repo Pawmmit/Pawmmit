@@ -11,8 +11,8 @@
 //
 
 #include "Command.h"
+#include "platform/GitInstall.h"
 #include <QDir>
-#include <QFileInfo>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QStandardPaths>
@@ -21,21 +21,9 @@ namespace git {
 
 QString Command::bashPath() {
   QStringList paths;
-
-#ifdef Q_OS_WIN
-  QString git = QStandardPaths::findExecutable("git");
-  if (git.isEmpty()) {
-    QFileInfo info("C:/Program Files/git/cmd/git.exe");
-    if (info.exists())
-      git = info.path();
-  }
-
-  if (!git.isEmpty()) {
-    QDir dir = QFileInfo(git).dir();
-    dir.cdUp();
-    paths.append(dir.filePath("bin"));
-  }
-#endif
+  QString gitDir = platform::gitInstallDir();
+  if (!gitDir.isEmpty())
+    paths.append(QDir(gitDir).filePath("bin"));
 
   return QStandardPaths::findExecutable("bash", paths);
 }
