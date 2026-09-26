@@ -47,8 +47,8 @@ int main(int argc, char *argv[]) {
   }
 #endif
 
-  // Restart from the path argument.
-  QProcess::startDetached(args.first(), QStringList());
-
-  return 0;
+  // Restart with the program and its arguments, which precede the pid.
+  QString program = args.takeFirst();
+  args.removeLast();
+  return QProcess::startDetached(program, args) ? 0 : 1;
 }

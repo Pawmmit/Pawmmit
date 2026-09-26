@@ -345,9 +345,14 @@ bool Updater::install(const DownloadRef &download, QString &error) {
   Debug("Relauncher command: " << relauncher_cmd);
 
   // Start the relaunch helper.
-  QString app = "flatpak-spawn --host flatpak run com.github.Pawmmit.Pawmmit";
   QString pid = QString::number(QCoreApplication::applicationPid());
-  if (!QProcess::startDetached(relauncher_cmd, {app, pid})) {
+  QStringList relaunchArgs = {"flatpak-spawn",
+                              "--host",
+                              "flatpak",
+                              "run",
+                              "com.github.Pawmmit.Pawmmit",
+                              pid};
+  if (!QProcess::startDetached(relauncher_cmd, relaunchArgs)) {
     error = tr("Helper application failed to start");
     return false;
   }
