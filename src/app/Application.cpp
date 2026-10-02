@@ -14,12 +14,12 @@
 #include "conf/Settings.h"
 #include "git/Id.h"
 #include "git/Repository.h"
-#include "ui/MainWindow.h"
-#include "ui/MenuBar.h"
-#include "ui/RepoView.h"
-#include "ui/TabWidget.h"
-#include "update/Updater.h"
 #include "languages.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
+#include "ui/window/MenuBar.h"
+#include "ui/window/TabWidget.h"
+#include "update/Updater.h"
 #include "util/Debug.h"
 #include <QCloseEvent>
 #include <QCommandLineParser>

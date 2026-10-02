@@ -11,9 +11,9 @@
 //
 
 #include "FindWidget.h"
-#include "HotkeyToolTip.h"
-#include "MenuBar.h"
 #include "editor/TextEditor.h"
+#include "ui/hotkeys/HotkeyToolTip.h"
+#include "ui/window/MenuBar.h"
 #include <QHBoxLayout>
 #include <QHideEvent>
 #include <QLabel>

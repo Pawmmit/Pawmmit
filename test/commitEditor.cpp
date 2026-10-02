@@ -1,6 +1,6 @@
 #include "Test.h"
 
-#include "ui/CommitEditor.h"
+#include "ui/detail/CommitEditor.h"
 
 #include <QTextEdit>
 

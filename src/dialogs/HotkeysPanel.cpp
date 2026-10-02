@@ -11,7 +11,7 @@
 //
 
 #include "HotkeysPanel.h"
-#include "ui/HotkeyManager.h"
+#include "ui/hotkeys/HotkeyManager.h"
 #include <QAbstractItemModel>
 #include <QDialog>
 #include <QDialogButtonBox>

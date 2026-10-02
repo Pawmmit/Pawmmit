@@ -10,14 +10,14 @@
 // Author: Jason Haslam
 //
 
-#include "qtsupport.h"
 #include "Test.h"
-#include "ui/DoubleTreeWidget.h"
-#include "ui/MainWindow.h"
-#include "ui/RepoView.h"
-#include "ui/TreeView.h"
-#include "ui/TreeProxy.h"
 #include "conf/Settings.h"
+#include "qtsupport.h"
+#include "ui/detail/DoubleTreeWidget.h"
+#include "ui/filetree/TreeProxy.h"
+#include "ui/filetree/TreeView.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
 #include <QFile>
 #include <QTextEdit>
 #include <QTextStream>

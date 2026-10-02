@@ -1,13 +1,13 @@
 #include "Test.h"
 
-#include "ui/DoubleTreeWidget.h"
-#include "ui/MainWindow.h"
-#include "ui/RepoView.h"
-#include "ui/TreeView.h"
+#include "ui/detail/DoubleTreeWidget.h"
+#include "ui/filetree/TreeView.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
 #include "watcher/RepositoryWatcher.h"
 
-#include <memory>
 #include <QSignalSpy>
+#include <memory>
 
 using namespace Test;
 

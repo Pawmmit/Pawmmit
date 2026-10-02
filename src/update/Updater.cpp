@@ -11,15 +11,15 @@
 //
 
 #include "Updater.h"
-#include "cmark.h"
-#include "DownloadDialog.h"
-#include "UpdateDialog.h"
-#include "UpToDateDialog.h"
-#include "conf/Settings.h"
-#include "ui/MainWindow.h"
-#include "platform/HostProcess.h"
-#include "util/Path.h"
 #include "Debug.h"
+#include "DownloadDialog.h"
+#include "UpToDateDialog.h"
+#include "UpdateDialog.h"
+#include "cmark.h"
+#include "conf/Settings.h"
+#include "platform/HostProcess.h"
+#include "ui/window/MainWindow.h"
+#include "util/Path.h"
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDialog>

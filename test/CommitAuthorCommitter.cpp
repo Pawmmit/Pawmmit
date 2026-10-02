@@ -1,7 +1,7 @@
 #include "Test.h"
 
-#include "ui/MainWindow.h"
-#include "ui/RepoView.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
 
 #include "conf/Settings.h"
 

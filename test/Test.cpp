@@ -13,11 +13,11 @@
 #include "Test.h"
 #include "Debug.h"
 #include "git/Config.h"
-#include "ui/RepoView.h"
+#include "ui/repo/RepoView.h"
 // #include <JlCompress.h>
-#include <exception>
-#include <QFileInfo>
 #include "zip.h"
+#include <QFileInfo>
+#include <exception>
 using namespace QTest;
 
 namespace Test {

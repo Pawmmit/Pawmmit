@@ -12,7 +12,7 @@
 
 #include "PullRequestDialog.h"
 #include "host/Account.h"
-#include "ui/RepoView.h"
+#include "ui/repo/RepoView.h"
 #include "ui_PullRequestDialog.h"
 #include <QCheckBox>
 #include <QComboBox>

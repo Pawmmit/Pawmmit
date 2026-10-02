@@ -16,8 +16,8 @@
 #include "git/Remote.h"
 #include "git/Repository.h"
 #include "ui/ExpandButton.h"
-#include "ui/ReferenceList.h"
-#include "ui/RepoView.h"
+#include "ui/references/ReferenceList.h"
+#include "ui/repo/RepoView.h"
 #include "ui_RemoteDialog.h"
 #include <QApplication>
 #include <QCheckBox>

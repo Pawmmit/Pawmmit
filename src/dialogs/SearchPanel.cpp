@@ -13,7 +13,8 @@
 #include "SearchPanel.h"
 #include "git/Config.h"
 #include "index/Index.h"
-#include "ui/RepoView.h"
+#include "index/IndexerProcess.h"
+#include "ui/repo/RepoView.h"
 #include "ui_SearchPanel.h"
 #include <QCheckBox>
 #include <QSpinBox>
@@ -34,9 +35,9 @@ SearchPanel::SearchPanel(RepoView *view, QWidget *parent)
     config.setValue("index.enable", checked);
 
     if (checked) {
-      view->startIndexing();
+      view->indexer()->start();
     } else {
-      view->cancelIndexing();
+      view->indexer()->cancel();
     }
   });
 
@@ -66,7 +67,7 @@ SearchPanel::SearchPanel(RepoView *view, QWidget *parent)
   ui->mRemove->setEnabled(view->index()->isValid());
   connect(ui->mRemove, &QPushButton::clicked, this, [view, this] {
     Index *index = view->index();
-    view->cancelIndexing();
+    view->indexer()->cancel();
     index->remove();
     ui->mRemove->setEnabled(index->isValid());
   });

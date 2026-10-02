@@ -1,11 +1,11 @@
 #include "Test.h"
 
-#include "ui/TemplateButton.h"
-#include "ui/TemplateDialog.h"
+#include "ui/detail/TemplateButton.h"
+#include "ui/detail/TemplateDialog.h"
 
 #include <QLineEdit>
-#include <QTextEdit>
 #include <QListWidget>
+#include <QTextEdit>
 
 class TestCommitMessageTemplate : public QObject {
   Q_OBJECT

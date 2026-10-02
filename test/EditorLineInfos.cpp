@@ -1,18 +1,18 @@
-#include "Test.h"
 #include "Debug.h"
+#include "Test.h"
 #include "dialogs/ExternalToolsDialog.h"
 
-#include "ui/DiffView/HunkWidget.h"
-#include "ui/DiffView/FileWidget.h"
+#include "ui/diffView/FileWidget.h"
+#include "ui/diffView/HunkWidget.h"
 
-#include "ui/MainWindow.h"
-#include "ui/DiffView/DiffView.h"
-#include "ui/RepoView.h"
+#include "ui/diffView/DiffView.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
 #include <QString>
 
-#include "git/Reference.h"
-#include "git/Diff.h"
 #include "git/Commit.h"
+#include "git/Diff.h"
+#include "git/Reference.h"
 #include "git/Tree.h"
 
 #define INIT_REPO(repoPath)                                                    \

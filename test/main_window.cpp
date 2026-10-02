@@ -11,7 +11,7 @@
 //
 
 #include "Test.h"
-#include "ui/MainWindow.h"
+#include "ui/window/MainWindow.h"
 
 using namespace Test;
 using namespace QTest;

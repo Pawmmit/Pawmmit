@@ -15,7 +15,7 @@
 #include "SubmoduleTableModel.h"
 #include "git/Submodule.h"
 #include "ui/Footer.h"
-#include "ui/RepoView.h"
+#include "ui/repo/RepoView.h"
 #include "ui_SubmodulesPanel.h"
 #include <QHeaderView>
 

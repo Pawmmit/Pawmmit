@@ -62,7 +62,7 @@
   <customwidget>
    <class>ReferenceList</class>
    <extends>QComboBox</extends>
-   <header>ui/ReferenceList.h</header>
+   <header>ui/references/ReferenceList.h</header>
   </customwidget>
  </customwidgets>
  <resources/>

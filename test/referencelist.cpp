@@ -11,11 +11,11 @@
 //
 
 #include "Test.h"
-#include "ui/MainWindow.h"
-#include "ui/RepoView.h"
-#include "ui/ReferenceList.h"
-#include "ui/ReferenceModel.h"
 #include "dialogs/CloneDialog.h"
+#include "ui/references/ReferenceList.h"
+#include "ui/references/ReferenceModel.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
 #include <QMainWindow>
 
 using namespace Test;

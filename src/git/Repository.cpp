@@ -326,7 +326,7 @@ Diff Repository::status(const Index &index, Diff::Callbacks *callbacks,
   diff.setIndex(index);
 
   // A merge still needs its commit when nothing differs from HEAD.
-  if (!diff.count() && state() != GIT_REPOSITORY_STATE_MERGE)
+  if (!diff.count() && operation() != Operation::Merge)
     return Diff();
 
   return diff;
@@ -955,7 +955,7 @@ bool Repository::merge(const AnnotatedCommit &mergeHead) {
  * If no current rebase is ongoing an invalid Rebase object is returned
  * \return
  */
-Rebase Repository::rebaseOpen() {
+Rebase Repository::rebaseOpen() const {
   git_rebase *rebase = nullptr;
   git_rebase_options opts = GIT_REBASE_OPTIONS_INIT; // TODO: check quite option
   git_rebase_open(&rebase, d->repo, &opts);
@@ -1100,6 +1100,57 @@ void Repository::cleanupState() {
     Patch::clearConflictResolutions(d->repo);
     emit d->notifier->stateChanged();
   }
+}
+
+Operation Repository::operation() const {
+  switch (state()) {
+    case GIT_REPOSITORY_STATE_NONE:
+      return Operation::None;
+
+    case GIT_REPOSITORY_STATE_MERGE:
+      return Operation::Merge;
+
+    case GIT_REPOSITORY_STATE_REVERT:
+    case GIT_REPOSITORY_STATE_REVERT_SEQUENCE:
+      return Operation::Revert;
+
+    case GIT_REPOSITORY_STATE_CHERRYPICK:
+    case GIT_REPOSITORY_STATE_CHERRYPICK_SEQUENCE:
+      return Operation::CherryPick;
+
+    case GIT_REPOSITORY_STATE_BISECT:
+      return Operation::Bisect;
+
+    case GIT_REPOSITORY_STATE_REBASE:
+    case GIT_REPOSITORY_STATE_REBASE_INTERACTIVE:
+    case GIT_REPOSITORY_STATE_REBASE_MERGE:
+      return Operation::Rebase;
+
+    case GIT_REPOSITORY_STATE_APPLY_MAILBOX:
+    case GIT_REPOSITORY_STATE_APPLY_MAILBOX_OR_REBASE:
+      return Operation::ApplyMailbox;
+  }
+  return Operation::None;
+}
+
+// The commit an in-progress merge, revert or cherry-pick is bringing in.
+Commit Repository::incomingCommit() const {
+  const char *ref = nullptr;
+  switch (operation()) {
+    case git::Operation::Merge:
+      ref = "MERGE_HEAD";
+      break;
+    case git::Operation::Revert:
+      ref = "REVERT_HEAD";
+      break;
+    case git::Operation::CherryPick:
+      ref = "CHERRY_PICK_HEAD";
+      break;
+    default:
+      return git::Commit();
+  }
+
+  return lookupRef(ref).target();
 }
 
 QStringConverter::Encoding Repository::encoding() const {

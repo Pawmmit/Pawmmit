@@ -11,7 +11,7 @@
 //
 
 #include "Application.h"
-#include "ui/MainWindow.h"
+#include "ui/window/MainWindow.h"
 #import <AppKit/AppKit.h>
 #include <QUrl>
 

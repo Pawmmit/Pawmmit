@@ -13,7 +13,7 @@
 #include "WindowPanel.h"
 #include "app/CustomTheme.h"
 #include "conf/Settings.h"
-#include "ui/EditorWindow.h"
+#include "ui/window/EditorWindow.h"
 #include "ui_WindowPanel.h"
 #include <QCheckBox>
 #include <QComboBox>

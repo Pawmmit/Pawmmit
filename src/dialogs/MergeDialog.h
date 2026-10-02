@@ -14,7 +14,7 @@
 #define MERGEDIALOG_H
 
 #include "git/Repository.h"
-#include "ui/RepoView.h"
+#include "ui/repo/RepoView.h"
 #include <QDialog>
 #include <QScopedPointer>
 

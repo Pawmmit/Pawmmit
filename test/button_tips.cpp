@@ -1,19 +1,19 @@
 #include "Test.h"
-#include "ui/MainWindow.h"
-#include "ui/CommitEditor.h"
-#include "ui/DoubleTreeWidget.h"
-#include "ui/MenuBar.h"
-#include "ui/RepoView.h"
-#include "ui/SearchField.h"
-#include "ui/ToolBar.h"
-#include "ui/TreeView.h"
+#include "ui/detail/CommitEditor.h"
+#include "ui/detail/DoubleTreeWidget.h"
+#include "ui/filetree/TreeView.h"
+#include "ui/repo/RepoView.h"
+#include "ui/search/SearchField.h"
+#include "ui/window/MainWindow.h"
+#include "ui/window/MenuBar.h"
+#include "ui/window/ToolBar.h"
 #include <QAbstractButton>
-#include <QCoreApplication>
 #include <QCalendarWidget>
+#include <QCoreApplication>
 #include <QFile>
-#include <QTextEdit>
 #include <QSettings>
 #include <QTemporaryDir>
+#include <QTextEdit>
 
 using namespace Test;
 using namespace QTest;

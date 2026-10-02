@@ -13,20 +13,20 @@
 #include "UpdateDialog.h"
 #include "DownloadDialog.h"
 #include "Updater.h"
-#include "ui/MenuBar.h"
 #include "conf/Settings.h"
 #include "dialogs/IconLabel.h"
+#include "ui/window/MenuBar.h"
 #include <QCheckBox>
 #include <QCoreApplication>
+#include <QDesktopServices>
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QTextBrowser>
 #include <QVBoxLayout>
-#include <QDesktopServices>
-#include <QMessageBox>
 
 #if ((!defined(Q_OS_LINUX) || defined(FLATPAK) || defined(DEBUG_FLATPAK)) &&   \
      defined(ENABLE_UPDATE_OVER_GUI))

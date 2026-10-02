@@ -11,12 +11,12 @@
 //
 
 #include "Test.h"
-#include "ui/CommitList.h"
-#include "ui/DetailView.h"
-#include "ui/DoubleTreeWidget.h"
-#include "ui/MainWindow.h"
-#include "ui/RepoView.h"
-#include "ui/TreeView.h"
+#include "ui/commits/CommitList.h"
+#include "ui/detail/DetailView.h"
+#include "ui/detail/DoubleTreeWidget.h"
+#include "ui/filetree/TreeView.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
 #include <QMessageBox>
 #include <QPushButton>
 #include <QToolButton>

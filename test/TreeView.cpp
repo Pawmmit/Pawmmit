@@ -1,11 +1,11 @@
 #include "Test.h"
-#include "ui/DiffView/DiffView.h"
-#include "ui/MainWindow.h"
-#include "ui/DoubleTreeWidget.h"
-#include "ui/TreeView.h"
-#include "ui/TreeProxy.h"
-#include "ui/FileContextMenu.h"
 #include "conf/Settings.h"
+#include "ui/detail/DoubleTreeWidget.h"
+#include "ui/diffView/DiffView.h"
+#include "ui/filetree/FileContextMenu.h"
+#include "ui/filetree/TreeProxy.h"
+#include "ui/filetree/TreeView.h"
+#include "ui/window/MainWindow.h"
 
 #include <QTextEdit>
 

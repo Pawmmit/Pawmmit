@@ -16,7 +16,7 @@
 #include "conf/ConfFile.h"
 #include "conf/Settings.h"
 #include "dialogs/ThemeDialog.h"
-#include "ui/DiffView/DiffView.h"
+#include "ui/diffView/DiffView.h"
 #include <QProxyStyle>
 #include <QStyleOption>
 #include <QWidget>

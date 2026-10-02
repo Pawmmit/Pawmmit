@@ -1,9 +1,9 @@
 #include "Test.h"
 #include "conf/Settings.h"
-#include "ui/MainWindow.h"
-#include "ui/RepoView.h"
-#include "ui/StateBanner.h"
-#include "ui/ToolBar.h"
+#include "ui/repo/RepoView.h"
+#include "ui/repo/StateBanner.h"
+#include "ui/window/MainWindow.h"
+#include "ui/window/ToolBar.h"
 #include <QAbstractButton>
 #include <QLabel>
 #include <QPushButton>

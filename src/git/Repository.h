@@ -51,6 +51,16 @@ class Signature;
 class Submodule;
 class TagRef;
 
+enum class Operation {
+  None,
+  Merge,
+  Revert,
+  CherryPick,
+  Bisect,
+  Rebase,
+  ApplyMailbox
+};
+
 class Repository {
   Q_DECLARE_TR_FUNCTIONS(Repository)
 
@@ -223,7 +233,7 @@ public:
   void rebase(const AnnotatedCommit &mergeHead,
               const QString &overrideUser = QString(),
               const QString &overrideEmail = QString());
-  Rebase rebaseOpen();
+  Rebase rebaseOpen() const;
   void rebaseAbort();
   void rebaseContinue(const QString &commitMessage);
   bool rebaseOngoing();
@@ -239,6 +249,10 @@ public:
   // Clean up after merge/rebase/cherry-pick/etc.
   int state() const;
   void cleanupState();
+  Operation operation() const;
+
+  // The commit an in-progress merge, revert or cherry-pick is bringing in.
+  Commit incomingCommit() const;
 
   // encoding
   QStringConverter::Encoding encoding() const;
