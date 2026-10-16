@@ -1,10 +1,10 @@
 #include "Test.h"
 
-#include "ui/FileContextMenu.h"
-#include "ui/MainWindow.h"
-#include "ui/RepoView.h"
-#include "ui/IgnoreDialog.h"
 #include "git/Reference.h"
+#include "ui/filetree/FileContextMenu.h"
+#include "ui/filetree/IgnoreDialog.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
 
 #include <QGuiApplication>
 #include <QMessageBox>

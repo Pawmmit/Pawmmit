@@ -19,9 +19,9 @@
 #include "RepoGeneralPanel.h"
 #include "SearchPanel.h"
 #include "SubmodulesPanel.h"
-#include "ui/BlameEditor.h"
-#include "ui/EditorWindow.h"
-#include "ui/RepoView.h"
+#include "ui/blame/BlameEditor.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/EditorWindow.h"
 #include <QAction>
 #include <QActionGroup>
 #include <QDialogButtonBox>

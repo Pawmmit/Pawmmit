@@ -1,19 +1,19 @@
 #include "Test.h"
 
-#include "qtsupport.h"
-#include "git/Signature.h"
-#include "git/Reference.h"
-#include "git/Tree.h"
-#include "ui/MainWindow.h"
-#include "ui/DoubleTreeWidget.h"
-#include "ui/RepoView.h"
-#include "ui/TreeView.h"
 #include "dialogs/AmendDialog.h"
+#include "git/Reference.h"
+#include "git/Signature.h"
+#include "git/Tree.h"
+#include "qtsupport.h"
+#include "ui/detail/DoubleTreeWidget.h"
+#include "ui/filetree/TreeView.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
 
-#include <QTextEdit>
-#include <QRadioButton>
 #include <QDateTimeEdit>
 #include <QLineEdit>
+#include <QRadioButton>
+#include <QTextEdit>
 
 #define INIT_REPO(repoPath)                                                    \
   QString path = Test::extractRepository(repoPath);                            \

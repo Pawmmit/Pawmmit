@@ -13,7 +13,7 @@
 #include "LfsPanel.h"
 #include "git/Config.h"
 #include "ui/Footer.h"
-#include "ui/RepoView.h"
+#include "ui/repo/RepoView.h"
 #include "ui_LfsPanel.h"
 #include <QCheckBox>
 #include <QDialogButtonBox>

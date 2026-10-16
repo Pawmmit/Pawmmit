@@ -14,8 +14,8 @@
 #include "ConfigDialog.h"
 #include "conf/Settings.h"
 #include "git/Config.h"
-#include "ui/MainWindow.h"
-#include "ui/RepoView.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
 #include "ui_DiffPanel.h"
 #include <QCheckBox>
 #include <QComboBox>

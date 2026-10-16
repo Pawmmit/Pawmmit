@@ -12,12 +12,12 @@
 
 #include "GeneralPanel.h"
 #include "AboutDialog.h"
+#include "LanguageComboBox.h"
 #include "conf/Settings.h"
 #include "cred/CredentialHelper.h"
 #include "git/Config.h"
-#include "LanguageComboBox.h"
-#include "ui/MainWindow.h"
-#include "ui/RepoView.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
 #include "ui_GeneralPanel.h"
 #include <QCheckBox>
 #include <QComboBox>

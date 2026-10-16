@@ -13,7 +13,7 @@
 #include "MergeDialog.h"
 #include "conf/Settings.h"
 #include "git/Branch.h"
-#include "ui/ReferenceList.h"
+#include "ui/references/ReferenceList.h"
 #include "ui_MergeDialog.h"
 #include <QCheckBox>
 #include <QDialogButtonBox>

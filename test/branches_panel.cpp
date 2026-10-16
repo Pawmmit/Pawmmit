@@ -13,8 +13,8 @@
 #include "Test.h"
 #include "dialogs/ConfigDialog.h"
 #include "ui/Footer.h"
-#include "ui/MainWindow.h"
-#include "ui/RepoView.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
 #include <QComboBox>
 #include <QDialog>
 #include <QMenu>

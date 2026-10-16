@@ -11,12 +11,12 @@
 //
 
 #include "Footer.h"
-#include "HotkeyToolTip.h"
+#include "ui/hotkeys/HotkeyToolTip.h"
 #include <QHBoxLayout>
 #include <QMenu>
+#include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
-#include <QPaintEvent>
 #include <QPen>
 #include <QStyleOption>
 #include <QStylePainter>

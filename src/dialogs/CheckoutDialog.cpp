@@ -12,7 +12,7 @@
 
 #include "CheckoutDialog.h"
 #include "git/Branch.h"
-#include "ui/ReferenceList.h"
+#include "ui/references/ReferenceList.h"
 #include "ui_CheckoutDialog.h"
 #include <QCheckBox>
 #include <QDialogButtonBox>

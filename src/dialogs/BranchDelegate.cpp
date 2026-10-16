@@ -12,7 +12,7 @@
 
 #include "BranchDelegate.h"
 #include "BranchTableModel.h"
-#include "ui/ReferenceList.h"
+#include "ui/references/ReferenceList.h"
 
 BranchDelegate::BranchDelegate(const git::Repository &repo, QObject *parent)
     : QStyledItemDelegate(parent), mRepo(repo) {}

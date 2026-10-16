@@ -10,17 +10,18 @@
 // Author: Shane Gramlich
 //
 
-#include "qtsupport.h"
 #include "Test.h"
 #include "log/LogEntry.h"
-#include "ui/MainWindow.h"
-#include "ui/DetailView.h"
-#include "ui/DiffView/DiffView.h"
-#include "ui/DoubleTreeWidget.h"
-#include "ui/RepoView.h"
-#include "ui/StateBanner.h"
-#include "ui/TreeView.h"
-#include "ui/CommitList.h"
+#include "qtsupport.h"
+#include "ui/commits/CommitList.h"
+#include "ui/detail/DetailView.h"
+#include "ui/detail/DoubleTreeWidget.h"
+#include "ui/diffView/DiffView.h"
+#include "ui/filetree/TreeView.h"
+#include "ui/repo/ConflictLabel.h"
+#include "ui/repo/RepoView.h"
+#include "ui/repo/StateBanner.h"
+#include "ui/window/MainWindow.h"
 #include "watcher/RepositoryWatcher.h"
 #include <QApplication>
 #include <QFile>
@@ -295,6 +296,7 @@ void TestMerge::mergeConflict() {
   confirm->button(QMessageBox::Cancel)->click();
   QCOMPARE(question, QString("Are you sure you want to abort the merge?"));
   QCOMPARE(mRepo->state(), GIT_REPOSITORY_STATE_MERGE);
+  QCOMPARE(mRepo->operation(), git::Operation::Merge);
 }
 
 void TestMerge::resolve() {
@@ -481,7 +483,8 @@ void TestMerge::revertConflict() {
 
   // The incoming side of a revert lacks the commit's change, so say "Undo".
   QString undo = QString("Undo commit %1").arg(commitA.shortId());
-  QCOMPARE(view->conflictTheirsLabel(), undo);
+  auto [oursLabel, theirsLabel] = conflict::labels(view->repo());
+  QCOMPARE(theirsLabel, undo);
   DiffView *diffView = view->findChild<DiffView *>();
   QToolButton *theirs = nullptr;
   QTRY_VERIFY_WITH_TIMEOUT(
@@ -535,8 +538,9 @@ void TestMerge::detachedMergeLabels() {
   QVERIFY(repo.setHeadDetached(repo.head().target()));
   view->merge(RepoView::Merge, repo.lookupRef("refs/heads/other"));
   QVERIFY(repo.index().hasConflicts());
-  QCOMPARE(view->conflictOursLabel(), QString("Keep current version"));
-  QCOMPARE(view->conflictTheirsLabel(), QString("Take other"));
+  auto [oursLabel, theirsLabel] = conflict::labels(view->repo());
+  QCOMPARE(oursLabel, QString("Keep current version"));
+  QCOMPARE(theirsLabel, QString("Take other"));
   view->window()->close();
 }
 
@@ -557,9 +561,10 @@ void TestMerge::stashConflictLabels() {
   view->applyStash(0);
   QVERIFY(repo.index().hasConflicts());
   QCOMPARE(repo.state(), GIT_REPOSITORY_STATE_NONE);
-  QCOMPARE(view->conflictOursLabel(),
-           QString("Keep %1").arg(repo.head().name()));
-  QCOMPARE(view->conflictTheirsLabel(), QString("Take stashed version"));
+  QCOMPARE(repo.operation(), git::Operation::None);
+  auto [oursLabel, theirsLabel] = conflict::labels(view->repo());
+  QCOMPARE(oursLabel, QString("Keep %1").arg(repo.head().name()));
+  QCOMPARE(theirsLabel, QString("Take stashed version"));
 
   // The banner says what happened, and only offers to show the conflicts.
   StateBanner *banner = view->findChild<StateBanner *>();

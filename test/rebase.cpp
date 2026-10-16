@@ -11,29 +11,29 @@
 //
 
 #include "Test.h"
-#include "ui/RepoView.h"
-#include "ui/DetailView.h"
-#include "ui/DoubleTreeWidget.h"
-#include "ui/DiffView/DiffView.h"
+#include "ui/detail/DetailView.h"
+#include "ui/detail/DoubleTreeWidget.h"
+#include "ui/diffView/DiffView.h"
+#include "ui/repo/RepoView.h"
 
-#include "ui/MainWindow.h"
-#include "ui/MenuBar.h"
-#include "ui/StateBanner.h"
-#include "ui/DetailView.h"
-#include "ui/DiffView/FileWidget.h"
-#include "ui/DiffView/HunkWidget.h"
+#include "ui/detail/DetailView.h"
+#include "ui/diffView/FileWidget.h"
+#include "ui/diffView/HunkWidget.h"
+#include "ui/repo/StateBanner.h"
+#include "ui/window/MainWindow.h"
+#include "ui/window/MenuBar.h"
 
-#include "git/Reference.h"
-#include "git/Diff.h"
 #include "git/Commit.h"
-#include "git/Tree.h"
+#include "git/Diff.h"
 #include "git/Patch.h"
+#include "git/Reference.h"
+#include "git/Tree.h"
 
 #include "log/LogEntry.h"
 
+#include <QPushButton>
 #include <QStackedWidget>
 #include <QTextEdit>
-#include <QPushButton>
 #include <QToolButton>
 
 #define INIT_REPO(repoPath)                                                    \

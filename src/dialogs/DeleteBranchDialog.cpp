@@ -15,8 +15,8 @@
 #include "git/Config.h"
 #include "git/Remote.h"
 #include "log/LogEntry.h"
-#include "ui/RemoteCallbacks.h"
-#include "ui/RepoView.h"
+#include "ui/repo/RemoteCallbacks.h"
+#include "ui/repo/RepoView.h"
 #include <QCheckBox>
 #include <QFutureWatcher>
 #include <QPushButton>

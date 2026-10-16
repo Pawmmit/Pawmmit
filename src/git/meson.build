@@ -16,6 +16,7 @@ git_src = [
     'Rebase.cpp',
     'Reference.cpp',
     'Remote.cpp',
+    'RemoteRunner.cpp',
     'Repository.cpp',
     'Result.cpp',
     'RevWalk.cpp',
@@ -26,9 +27,7 @@ git_src = [
     'Tree.cpp',
 ]
 
-git_public_args = [
-    '-DUSE_SYSTEM_LIBGIT2'
-]
+git_public_args = ['-DUSE_SYSTEM_LIBGIT2']
 
 # RepositoryNotifier (in Repository.h) is the only Q_OBJECT class here.
 git_moc = qt6.preprocess(
@@ -40,7 +39,14 @@ git_lib = static_library(
     'git',
     git_src + git_moc,
     cpp_args: git_public_args,
-    dependencies: [pawmmit_common, libgit2_dep, libssh2_dep, pawmmitUtil_dep, platform_dep])
+    dependencies: [
+        pawmmit_common,
+        libgit2_dep,
+        libssh2_dep,
+        pawmmitUtil_dep,
+        platform_dep,
+    ],
+)
 
 git_dep = declare_dependency(
     link_with: git_lib,
@@ -49,4 +55,3 @@ git_dep = declare_dependency(
     # Remote.cpp calls libssh2 directly; consumers that link git need it too.
     dependencies: [libgit2_dep, libssh2_dep],
 )
-

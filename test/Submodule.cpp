@@ -12,20 +12,19 @@
 
 #include "Test.h"
 
-#include "qtsupport.h"
-#include "dialogs/CloneDialog.h"
-#include "ui/MainWindow.h"
-#include "ui/RepoView.h"
-#include "ui/RepoView.h"
 #include "conf/Settings.h"
+#include "dialogs/CloneDialog.h"
 #include "git/Submodule.h"
-#include "ui/DoubleTreeWidget.h"
-#include "ui/TreeView.h"
+#include "qtsupport.h"
+#include "ui/detail/DoubleTreeWidget.h"
+#include "ui/filetree/TreeView.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
 
-#include <QToolButton>
-#include <QMenu>
-#include <QWizard>
 #include <QLineEdit>
+#include <QMenu>
+#include <QToolButton>
+#include <QWizard>
 
 #define INIT_REPO(repoPath)                                                    \
   QString path = Test::extractRepository(repoPath);                            \

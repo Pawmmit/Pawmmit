@@ -12,10 +12,10 @@
 
 #include "Test.h"
 #include "editor/TextEditor.h"
-#include "ui/BlameEditor.h"
-#include "ui/EditorWindow.h"
 #include "ui/FindWidget.h"
-#include "ui/MenuBar.h"
+#include "ui/blame/BlameEditor.h"
+#include "ui/window/EditorWindow.h"
+#include "ui/window/MenuBar.h"
 #include <QDialogButtonBox>
 #include <QLabel>
 #include <QLineEdit>

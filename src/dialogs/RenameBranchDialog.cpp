@@ -10,8 +10,8 @@
 #include "RenameBranchDialog.h"
 #include "git/Branch.h"
 #include "ui/ExpandButton.h"
-#include "ui/ReferenceList.h"
-#include "ui/RepoView.h"
+#include "ui/references/ReferenceList.h"
+#include "ui/repo/RepoView.h"
 #include "ui_RenameBranchDialog.h"
 #include <QApplication>
 #include <QCheckBox>

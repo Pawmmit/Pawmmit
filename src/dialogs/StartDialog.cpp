@@ -22,10 +22,10 @@
 #include "host/Accounts.h"
 #include "host/Repository.h"
 #include "ui/Footer.h"
-#include "ui/MainWindow.h"
 #include "ui/ProgressIndicator.h"
-#include "ui/RepoView.h"
-#include "ui/TabWidget.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
+#include "ui/window/TabWidget.h"
 #include "ui_StartDialog.h"
 #include "util/Path.h"
 #include <QAbstractItemModel>
@@ -37,11 +37,11 @@
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMessageBox>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMultiMap>
-#include <QPushButton>
 #include <QPointer>
+#include <QPushButton>
 #include <QSettings>
 #include <QStyledItemDelegate>
 #include <QTimer>

@@ -13,8 +13,8 @@
 #include "NewBranchDialog.h"
 #include "git/Reference.h"
 #include "ui/ExpandButton.h"
-#include "ui/ReferenceList.h"
-#include "ui/RepoView.h"
+#include "ui/references/ReferenceList.h"
+#include "ui/repo/RepoView.h"
 #include "ui_NewBranchDialog.h"
 #include <QApplication>
 #include <QCheckBox>

@@ -10,13 +10,13 @@
 // Author: Shane Gramlich
 //
 
-#include "Test.h"
 #include "Debug.h"
+#include "Test.h"
 #include "dialogs/CloneDialog.h"
 #include "dialogs/StartDialog.h"
 #include "ui/Footer.h"
-#include "ui/MainWindow.h"
-#include "ui/RepoView.h"
+#include "ui/repo/RepoView.h"
+#include "ui/window/MainWindow.h"
 #include <QMenu>
 #include <QToolButton>
 

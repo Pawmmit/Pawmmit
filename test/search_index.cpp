@@ -15,9 +15,9 @@
 #include "index/IndexDatabase.h"
 #include "index/Query.h"
 #include "dialogs/SearchPanel.h"
-#include "ui/IndexCompleter.h"
-#include "ui/MainWindow.h"
-#include "ui/RepoView.h"
+#include "ui/search/IndexCompleter.h"
+#include "ui/window/MainWindow.h"
+#include "ui/repo/RepoView.h"
 #include <QPushButton>
 #include <QLineEdit>
 #include <QProcess>

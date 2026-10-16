@@ -18,7 +18,7 @@
 #include "git/Result.h"
 #include "log/LogEntry.h"
 #include "log/LogView.h"
-#include "ui/RemoteCallbacks.h"
+#include "ui/repo/RemoteCallbacks.h"
 #include <QVBoxLayout>
 #include <QtConcurrent>
 

@@ -11,19 +11,19 @@
 //
 
 #include "TextEditor.h"
-#include <Scintillua.h>
 #include "app/Application.h"
 #include "conf/Settings.h"
+#include <QCheckBox>
 #include <QFocusEvent>
 #include <QMainWindow>
+#include <QMenu>
 #include <QScrollBar>
 #include <QStyle>
 #include <QWindow>
-#include <QMenu>
-#include <QCheckBox>
+#include <Scintillua.h>
 
 #include "PlatQt.h"
-#include "ui/HotkeyManager.h"
+#include "ui/hotkeys/HotkeyManager.h"
 #include <QRegularExpression>
 #include <QVariantMap>
 
