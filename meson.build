@@ -5,8 +5,7 @@ project(
     meson_version: '>= 1.3',
     # buildtype=release alone doesn't define NDEBUG, but confDir()/l10nDir()
     # need it to prefer installed paths. The fallback Lua would otherwise be a
-    # shared library that no packaging step bundles. Lua errors unwind through
-    # extern "C" functions, which MSVC's default /EHsc assumes never throw.
+    # shared library that no packaging step bundles.
     default_options: [
         'cpp_std=c++17',
         'c_std=c99',
@@ -14,7 +13,6 @@ project(
         'b_ndebug=if-release',
         'lua:default_library=static',
         'sqlite3:default_library=static',
-        'cpp_eh=s',
     ],
 )
 
@@ -54,9 +52,6 @@ endif
 if get_option('enable_update_over_gui')
     _defs += '-DENABLE_UPDATE_OVER_GUI'
 endif
-if get_option('enable_sha256')
-    _defs += '-DGIT_EXPERIMENTAL_SHA256'
-endif
 
 # cmake and/or Qt in cmake seems to inject these defines in that we depend on
 if is_win
@@ -76,6 +71,12 @@ if cc.get_argument_syntax() == 'gcc'
     endif
 endif
 
+# Lua errors unwind through extern "C" functions, which MSVC's default /EHsc
+# assumes never throw. Global so the C++ subprojects get it as well.
+if cc.get_argument_syntax() == 'msvc'
+    add_global_arguments('/EHs', '/EHc-', language: 'cpp')
+endif
+
 # libgit2's qsort_r pulls in dlopen on Linux (folded into libc on current glibc,
 # so this is only needed on older systems).
 if not is_mac and not is_win
@@ -90,19 +91,78 @@ hunspell_dep = dependency('hunspell', version: '>=1.7')
 lexilla_dep = dependency('lexilla')
 sqlite_dep = dependency('sqlite3', version: '>=3.43')
 
-# System-only: Meson's CMake bridge can't reconstruct libgit2's own build.
-# Windows/macOS get it via vcpkg/Homebrew (see build.yml); Flatpak builds it
-# directly with CMake. vcpkg ships no .pc file, so Windows resolves it via
-# CMake's own exported target, which libgit2 names libgit2::libgit2package.
-if is_win
-    libgit2_dep = dependency(
-        'libgit2',
-        version: '>=1.9',
-        method: 'cmake',
-        modules: ['libgit2::libgit2package'],
+# vcpkg ships no .pc file, so Windows resolves libgit2 via CMake's own exported
+# target, which libgit2 names libgit2::libgit2package.
+bundle_libgit2 = get_option('bundle_libgit2')
+libgit2_dep = dependency('', required: false)
+if not bundle_libgit2.enabled()
+    if is_win
+        libgit2_dep = dependency(
+            'libgit2',
+            version: '>=1.9',
+            method: 'cmake',
+            modules: ['libgit2::libgit2package'],
+            required: bundle_libgit2.disabled(),
+            allow_fallback: false,
+        )
+    else
+        libgit2_dep = dependency(
+            'libgit2',
+            version: '>=1.9',
+            method: 'pkg-config',
+            required: bundle_libgit2.disabled(),
+            allow_fallback: false,
+        )
+    endif
+endif
+
+# Meson's own wrap fallback can't pass CMake options, so the subproject is set up
+# here instead: static, not installed, and with the builtin regex backend so it
+# doesn't pick up whichever PCRE is installed.
+if not libgit2_dep.found()
+    cmake = import('cmake')
+    libgit2_opts = cmake.subproject_options()
+    libgit2_opts.add_cmake_defines(
+        {
+            'BUILD_SHARED_LIBS': false,
+            'BUILD_TESTS': false,
+            'BUILD_CLI': false,
+            'BUILD_EXAMPLES': false,
+            'USE_SSH': 'libssh2',
+            'REGEX_BACKEND': 'builtin',
+            'CMAKE_C_STANDARD': '99',
+        },
     )
-else
-    libgit2_dep = dependency('libgit2', version: '>=1.9')
+    libgit2_opts.set_install(false)
+    libgit2_sub = cmake.subproject('libgit2', options: libgit2_opts)
+
+    # The CMake bridge drops link flags given as strings, which is how libgit2
+    # adds its SecureTransport frameworks and iconv on macOS.
+    libgit2_sys_deps = []
+    if is_mac
+        libgit2_sys_deps += [
+            dependency('appleframeworks', modules: ['CoreFoundation', 'Security']),
+            dependency('iconv'),
+        ]
+    endif
+
+    # The CMake target also exports libgit2's private include dirs, whose
+    # src/util/process.h shadows MSVC's own, so only the public headers are used.
+    # GIT_STATIC stops those headers declaring the API as dllimport on Windows.
+    libgit2_dep = declare_dependency(
+        dependencies: [
+            libgit2_sub.dependency('libgit2package').partial_dependency(
+                links: true,
+                link_args: true,
+            ),
+        ]
+        + libgit2_sys_deps,
+        # Must match the directory in subprojects/libgit2.wrap.
+        include_directories: include_directories(
+            'subprojects/libgit2-2.0.0-rc.1/include',
+        ),
+        compile_args: '-DGIT_STATIC',
+    )
 endif
 
 libssh2_dep = dependency('libssh2')

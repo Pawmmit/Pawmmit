@@ -49,7 +49,7 @@ bool ExternalTool::isValid() const { return !mFile.isEmpty(); }
 QString ExternalTool::lookupCommand(const QString &key, bool &shell) {
   git::Config config = git::Config::global();
   QString path = Settings::confDir().filePath("mergetools");
-  config.addFile(QDir::toNativeSeparators(path), GIT_CONFIG_LEVEL_PROGRAMDATA);
+  config.addFile(QDir::toNativeSeparators(path), git::Config::kDefaultsLevel);
 
   QString name = config.value<QString>(QString("%1.tool").arg(key));
   if (name.isEmpty())

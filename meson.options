@@ -53,10 +53,10 @@ option(
 )
 
 option(
-    'enable_sha256',
-    type: 'boolean',
-    value: false,
-    description: 'Enable experimental libgit2 SHA256 support (needs a libgit2 built with it)',
+    'bundle_libgit2',
+    type: 'feature',
+    value: 'auto',
+    description: 'Bundle libgit2 with performance patches (auto: only if no system libgit2 is found)',
 )
 
 option(

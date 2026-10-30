@@ -1,0 +1,1157 @@
+diff --git a/src/libgit2/commit_graph.c b/src/libgit2/commit_graph.c
+index 35556091b..956c7dbb3 100644
+--- a/src/libgit2/commit_graph.c
++++ b/src/libgit2/commit_graph.c
+@@ -550,6 +550,7 @@ static int git_commit_graph_entry_get_byindex(
+ 	}
+ 
+ 	commit_data = file->commit_data + pos * (oid_size + 4 * sizeof(uint32_t));
++	e->graph_id = pos;
+ 	git_oid_from_raw(&e->tree_oid, commit_data, file->oid_type);
+ 	e->parent_indices[0] = ntohl(*((uint32_t *)(commit_data + oid_size)));
+ 	e->parent_indices[1] = ntohl(
+@@ -1359,3 +1360,243 @@ int git_commit_graph__writer_dump(
+ {
+ 	return commit_graph_write(w, commit_graph_write_buf, cgraph);
+ }
++
++/*
++ * Returns the length of the literal, non-wildcard directory prefix of a
++ * pathspec pattern.
++ * Returns 0 if there is no such prefix (it starts with a wildcard)
++ */
++static size_t bloom_path_prefix_length(const char *pattern, size_t pattern_len)
++{
++	size_t i;
++	size_t last_slash = 0;
++
++	for (i = 0; i < pattern_len; i++) {
++		if (git__iswildcard((unsigned char)pattern[i]))
++			break;
++		else if (pattern[i] == '/')
++			last_slash = i;
++	}
++
++	/*
++	 * If we ran through the entire pattern without finding a wildcard
++	 * (why did we get called then?!), return the full length,
++	 * otherwise the prefix length
++	 */
++	if (i == pattern_len)
++		return pattern_len;
++	else
++		return last_slash;
++}
++
++/* Create a pre-computed hash of part of a path */
++static git_vector *bloom_filter_create_hash(git_attr_fnmatch *match,
++	size_t check_len,
++	git_commit_graph_file *cgfile)
++{
++	git_vector *match_entry = git__malloc(sizeof(git_vector));
++	if (!match_entry ||
++		git_vector_init(match_entry, 0, NULL) != 0) {
++		git__free(match_entry);
++		return NULL;
++	}
++
++	while (check_len > 0) {
++		const void *sep;
++		git_bloom_filter_hash_entry *hash_entry = git__malloc(
++				sizeof(git_bloom_filter_hash_entry));
++		if (!hash_entry) {
++			git_vector_dispose_deep(match_entry);
++			git__free(match_entry);
++			return NULL;
++		}
++
++		/*Pre-calculate hash*/
++		if (cgfile->bloom_filter_hash_version == 1) {
++			hash_entry->h1 = git__hash(
++					match->pattern, check_len, 0x293ae76f);
++			hash_entry->h2 = git__hash(
++					match->pattern, check_len, 0x7e646e2c);
++		} else {
++			hash_entry->h1 = git__hash_v2(
++					match->pattern, check_len, 0x293ae76f);
++			hash_entry->h2 = git__hash_v2(
++					match->pattern, check_len, 0x7e646e2c);
++		}
++		git_vector_insert(match_entry, hash_entry);
++
++		/*
++			* Move to the next ancestor directory, if any, dropping
++			* the separator itself from the next hash.
++			*/
++		sep = git__memrchr(match->pattern, '/', check_len);
++		check_len = sep ? (size_t)((const char *)sep -
++									match->pattern) :
++							0;
++	}
++	return match_entry;
++}
++
++int git_bloom_filter__cache_new(
++        git_bloom_filter_cache **out,
++        git_pathspec *ps,
++        git_commit_graph_file *cgfile)
++{
++	size_t i;
++	git_attr_fnmatch *match;
++	GIT_ASSERT(out);
++	GIT_ASSERT(ps);
++	GIT_ASSERT(cgfile);
++
++	*out = git__malloc(sizeof(git_bloom_filter_cache));
++	if (!*out)
++		return GIT_ERROR;
++	/* NOTE: ps->pathspec.length is sometimes an over-estimation of the size
++	 * we actually need. However, it should be a negligible problem
++	 */
++	if (git_vector_init(&(*out)->match_cache, ps->pathspec.length, NULL) != 0) {
++		git_bloom_filter__cache_free(*out);
++		*out = NULL;
++		return GIT_ERROR;
++	}
++
++	git_vector_foreach(&ps->pathspec, i, match) {
++		git_vector *match_entry;
++		size_t check_len;
++
++		/*
++		 * Ignore all negative patterns since we want to cache ways to
++		 * find potential changes
++		 */
++		if (match->flags & GIT_ATTR_FNMATCH_NEGATIVE) {
++			/* Bail out here since this pattern isn't usable against
++			 * the bloom filter*/
++			git_bloom_filter__cache_free(*out);
++			*out = NULL;
++			return GIT_EINVALID;
++		} else if (match->flags & GIT_ATTR_FNMATCH_HASWILD) {
++			/*
++			 * We can't filter on the entire pattern, but we can at
++			 * least filter on the non-wildcard path prefix
++			 */
++			check_len = bloom_path_prefix_length(
++			        match->pattern, match->length);
++			/* Bail out here since this pattern isn't usable against
++			 * the bloom filter*/
++			if (check_len == 0) {
++				git_bloom_filter__cache_free(*out);
++				*out = NULL;
++				return GIT_EINVALID;
++			}
++		} else {
++			check_len = match->length;
++		}
++
++		match_entry = bloom_filter_create_hash(match, check_len, cgfile);
++		if (match_entry) {
++			git_vector_insert(&(*out)->match_cache, match_entry);
++		} else {
++			git_bloom_filter__cache_free(*out);
++			*out = NULL;
++			return GIT_ERROR;
++		}
++	}
++	return 0;
++}
++
++void git_bloom_filter__cache_free(git_bloom_filter_cache *bfcache)
++{
++	size_t i;
++	git_vector *match_entry;
++
++	if (!bfcache)
++		return;
++
++	git_vector_foreach(&bfcache->match_cache, i, match_entry) {
++		git_vector_dispose_deep(match_entry);
++		git__free(match_entry);
++	}
++	git_vector_dispose(&bfcache->match_cache);
++	git__free(bfcache);
++}
++
++static bool bloom_filter_check_pattern(git_vector *match_entry,
++	git_commit_graph_file *cgfile,
++	const unsigned char *filter,
++	size_t filter_bits)
++{
++	git_bloom_filter_hash_entry *hash_entry;
++	size_t j, k;
++	git_vector_foreach(match_entry, j, hash_entry) {
++		bool component_in_filter = true;
++
++		for (k = 0; k < cgfile->bloom_filter_num_hashes; k++) {
++			/* This line has deliberate 32bit overflow */
++			uint32_t bit_index =
++					(uint32_t)(hash_entry->h1 +
++								(k * hash_entry->h2)) %
++					filter_bits;
++			if (!(filter[bit_index / 8] &
++					(1u << (bit_index & 7)))) {
++				component_in_filter = false;
++				break;
++			}
++		}
++		if (!component_in_filter) {
++			return false;
++		}
++	}
++	return true;
++}
++
++int git_bloom_filter__check(
++        git_bloom_filter_cache *bfcache,
++        git_commit_graph_file *cgfile,
++        size_t id)
++{
++	const unsigned char *filter;
++	uint32_t filter_start = 0, filter_end, length;
++	size_t filter_bits;
++	git_vector *match_entry;
++	size_t i;
++	GIT_ASSERT(bfcache);
++	GIT_ASSERT(cgfile);
++
++	/* Both the data and index need to be valid*/
++	if (!cgfile->bloom_filter_data || !cgfile->bloom_filter_indexes) {
++		return 1;
++	}
++
++	filter_end = ntohl(cgfile->bloom_filter_indexes[id]);
++	if (id > 0) {
++		filter_start = ntohl(cgfile->bloom_filter_indexes[id - 1]);
++	}
++	/* Mark as 'maybe' if the filter is corrupt or saturated */
++	if (filter_end == UINT32_MAX || filter_end < filter_start)
++		return 1;
++	length = filter_end - filter_start;
++	if (length == 0)
++		return 0; /* Commit didn't touch anything */
++
++	filter = cgfile->bloom_filter_data + filter_start;
++	/* Convert blocks to bits */
++	filter_bits = length * 8;
++
++	/*
++	 * match_cache holds one entry per pathspec pattern that has at least
++	 * one hash entry. A hash entry correspond to a file or folder name.
++	 * We return 1 if there's at match with at least one pattern.
++	 * In order to match a pattern, all it's hash entries must match.
++	 * Thus we return 0 (definitly not touched) if no pattern has all it's
++	 * hash entries matched in the filter.
++	 */
++	git_vector_foreach(&bfcache->match_cache, i, match_entry) {
++		/* All entries in a pattern matched, so it's a 'maybe touched'
++		 */
++		if (bloom_filter_check_pattern(
++				match_entry, cgfile, filter, filter_bits))
++			return 1;
++	}
++	/* This is a definite 'not touched' since no pattern returned a match */
++	return 0;
++}
+diff --git a/src/libgit2/commit_graph.h b/src/libgit2/commit_graph.h
+index dc1c9e655..119670851 100644
+--- a/src/libgit2/commit_graph.h
++++ b/src/libgit2/commit_graph.h
+@@ -9,6 +9,7 @@
+ #define INCLUDE_commit_graph_h__
+ 
+ #include "common.h"
++#include "pathspec.h"
+ 
+ #include "git2/types.h"
+ #include "git2/sys/commit_graph.h"
+@@ -116,6 +117,9 @@ typedef struct git_commit_graph_entry {
+ 	/* The object ID of the root tree of the commit. */
+ 	git_oid tree_oid;
+ 
++	/* The ID/offset for this entry within the commit graph */
++	size_t graph_id;
++
+ 	/* The object ID hash of the requested commit. */
+ 	git_oid sha1;
+ } git_commit_graph_entry;
+@@ -210,4 +214,29 @@ int git_commit_graph_file_parse(
+ 		const unsigned char *data,
+ 		size_t size);
+ 
++typedef struct git_bloom_filter_cache {
++	git_vector match_cache;
++} git_bloom_filter_cache;
++
++typedef struct git_bloom_filter_hash_entry {
++	uint32_t h1;
++	uint32_t h2;
++} git_bloom_filter_hash_entry;
++
++int git_bloom_filter__cache_new(git_bloom_filter_cache **out,
++	git_pathspec *ps,
++	git_commit_graph_file *cgfile);
++
++void git_bloom_filter__cache_free(git_bloom_filter_cache *bfcache);
++
++/**
++ * Check the bloom filter to see whether or not paths from pathspec
++ * _might_ have been modified by the commit
++ * 
++ * @return int Return 0 if the commit definitly doesn't touch the pathspec
++ */
++int git_bloom_filter__check(git_bloom_filter_cache *bfcache,
++	git_commit_graph_file *cgfile,
++	size_t id);
++
+ #endif
+diff --git a/src/libgit2/revwalk.c b/src/libgit2/revwalk.c
+index d2278cd37..a67fa3c2b 100644
+--- a/src/libgit2/revwalk.c
++++ b/src/libgit2/revwalk.c
+@@ -8,6 +8,7 @@
+ #include "revwalk.h"
+ 
+ #include "commit.h"
++#include "commit_graph.h"
+ #include "odb.h"
+ #include "pathspec.h"
+ #include "pool.h"
+@@ -632,6 +633,22 @@ static bool include_path(git_revwalk *walk, git_commit_list_node *commit_node)
+ 	return include;
+ }
+ 
++/**
++ * @return int Return 0 if the commit definitly doesn't touch the pathspec
++ */
++static int check_bloom_filter(git_revwalk *walk, git_commit_list_node *commit)
++{
++	git_commit_graph_entry entry;
++
++	/* Ensure we have a valid commit graph to look at */
++	if (!walk->pathspec_cgfile)
++		return 1;
++	if (git_commit_graph_entry_find(&entry, walk->pathspec_cgfile, &commit->oid, git_oid_hexsize(commit->oid.type)) < 0) {
++		return 1;
++	}
++	return git_bloom_filter__check(walk->pathspec_cache, walk->pathspec_cgfile, entry.graph_id);
++}
++
+ static int limit_list(git_commit_list **out, git_revwalk *walk, git_commit_list *commits)
+ {
+ 	int error, slop = SLOP;
+@@ -656,6 +673,10 @@ static int limit_list(git_commit_list **out, git_revwalk *walk, git_commit_list
+ 			break;
+ 		}
+ 
++		/* Use bloom filter if available */
++		if (walk->pathspec_cache && check_bloom_filter(walk, commit) == 0)
++			continue;
++		
+ 		if (walk->pathspec && !include_path(walk, commit))
+ 			continue;
+ 
+@@ -899,6 +920,7 @@ void git_revwalk_free(git_revwalk *walk)
+ 	git_revwalk_oidmap_dispose(&walk->commits);
+ 	git_pool_clear(&walk->commit_pool);
+ 	git_pqueue_free(&walk->iterator_time);
++	git_bloom_filter__cache_free(walk->pathspec_cache);
+ 	git__free(walk);
+ }
+ 
+@@ -986,8 +1008,27 @@ int git_revwalk_pathspec(git_revwalk *walk, git_pathspec *pathspec) {
+ 	if (pathspec) {
+ 		walk->pathspec = pathspec;
+ 		walk->pathspec_wildcard = pathspec_has_wildcard(pathspec);
++
++		/* Clear previous cache if it exists */
++		git_bloom_filter__cache_free(walk->pathspec_cache);
++		walk->pathspec_cache = NULL;
++		walk->pathspec_cgfile = NULL;
++
++		if (walk->odb &&
++			git_odb__get_commit_graph_file(&walk->pathspec_cgfile, walk->odb) == 0) {
++				/* Discard the return value since git_bloom_filter__cache_new cleans up the error cases for us*/
++				(void)git_bloom_filter__cache_new(&walk->pathspec_cache, pathspec, walk->pathspec_cgfile);
++		}
+ 		walk->limited = 1;
+ 	}
++	/* Reset previously set pathspec */ 
++	else if (walk->pathspec) {
++		walk->pathspec = NULL;
++		walk->pathspec_wildcard = false;
++		git_bloom_filter__cache_free(walk->pathspec_cache);
++		walk->pathspec_cache = NULL;
++		walk->pathspec_cgfile = NULL;
++	}
+ 
+ 	return 0;
+ }
+diff --git a/src/libgit2/revwalk.h b/src/libgit2/revwalk.h
+index 44c716706..ccbe3de30 100644
+--- a/src/libgit2/revwalk.h
++++ b/src/libgit2/revwalk.h
+@@ -8,6 +8,7 @@
+ #define INCLUDE_revwalk_h__
+ 
+ #include "common.h"
++#include "commit_graph.h"
+ 
+ #include "git2/revwalk.h"
+ #include "commit_list.h"
+@@ -49,6 +50,8 @@ struct git_revwalk {
+ 
+ 	git_pathspec *pathspec;
+ 	bool pathspec_wildcard;
++	git_bloom_filter_cache *pathspec_cache;
++	git_commit_graph_file *pathspec_cgfile;
+ };
+ 
+ git_commit_list_node *git_revwalk__commit_lookup(git_revwalk *walk, const git_oid *oid);
+diff --git a/src/util/util.c b/src/util/util.c
+index f22a75b2f..8f366d5cc 100644
+--- a/src/util/util.c
++++ b/src/util/util.c
+@@ -439,92 +439,126 @@ void git__hexdump(const char *buffer, size_t len)
+ 	printf("\n");
+ }
+ 
+-#ifdef GIT_LEGACY_HASH
+-uint32_t git__hash(const void *key, int len, unsigned int seed)
++/**
++ * @brief Implemented based on 
++ * https://github.com/aappleby/smhasher/blob/master/src/MurmurHash3.cpp
++ * @note Contains deliberate errors to mimic git behaviour!
++ */
++uint32_t git__hash(const void *key, size_t len, uint32_t seed)
+ {
+-	const uint32_t m = 0x5bd1e995;
+-	const int r = 24;
+-	uint32_t h = seed ^ len;
+-
+-	const unsigned char *data = (const unsigned char *)key;
+-
+-	while(len >= 4) {
+-		uint32_t k = *(uint32_t *)data;
+-
+-		k *= m;
+-		k ^= k >> r;
+-		k *= m;
+-
+-		h *= m;
+-		h ^= k;
+-
+-		data += 4;
+-		len -= 4;
++	/*
++	* Access data through signed bytes, which is what separates v1 and v2.
++	* NOTE: git uses char here, however doing so will break the test cases on
++	* the few platforms where char is unsigned. For these platforms, this will
++	* NOT be git compatible
++	* NOTE #2: Casting to uint32_t is required when accessing `data` since 
++	*  bit shifting a negative, signed integer is undefined behaviour
++	*/
++	const int8_t * data = (const int8_t*)key;
++	const size_t nblocks = len / 4;
++
++	uint32_t h1 = seed;
++
++	const uint32_t c1 = 0xcc9e2d51;
++	const uint32_t c2 = 0x1b873593;
++	size_t i;
++	uint32_t k1 = 0;
++	const int8_t *tail;
++
++	for(i = 0; i < nblocks; i++)
++	{
++	k1 = (uint32_t)data[i*4] |
++			(uint32_t)data[i*4 + 1] << 8 |
++			(uint32_t)data[i*4 + 2] << 16 |
++			(uint32_t)data[i*4 + 3] << 24;
++
++	k1 *= c1;
++	k1 = git__rotl(k1, 15);
++	k1 *= c2;
++
++	h1 ^= k1;
++	h1 = git__rotl(h1, 13);
++	h1 = h1*5+0xe6546b64;
+ 	}
+ 
+-	switch(len) {
+-	case 3: h ^= data[2] << 16;
+-	case 2: h ^= data[1] << 8;
+-	case 1: h ^= data[0];
+-			h *= m;
++	tail = (const int8_t*)(data + nblocks*4);
++	k1 = 0;
++
++	switch(len & 3)
++	{
++	case 3:
++	k1 ^= ((uint32_t)tail[2]) << 16;
++	/*fallthrough*/
++	case 2:
++	k1 ^= ((uint32_t)tail[1]) << 8;
++	/*fallthrough*/
++	case 1: k1 ^= (uint32_t)tail[0];
++			k1 *= c1;
++			k1 = git__rotl(k1, 15);
++			k1 *= c2;
++			h1 ^= k1;
+ 	};
+ 
+-	h ^= h >> 13;
+-	h *= m;
+-	h ^= h >> 15;
++	h1 ^= len;
++	h1 ^= h1 >> 16;
++	h1 *= 0x85ebca6b;
++	h1 ^= h1 >> 13;
++	h1 *= 0xc2b2ae35;
++	h1 ^= h1 >> 16;
+ 
+-	return h;
++	return h1;
+ }
+-#else
+-/*
+-	Cross-platform version of Murmurhash3
+-	http://code.google.com/p/smhasher/wiki/MurmurHash3
+-	by Austin Appleby (aappleby@gmail.com)
+ 
+-	This code is on the public domain.
+-*/
+-uint32_t git__hash(const void *key, int len, uint32_t seed)
++/**
++ * @brief Implemented based on 
++ * https://github.com/aappleby/smhasher/blob/master/src/MurmurHash3.cpp
++ */
++uint32_t git__hash_v2(const void *key, size_t len, uint32_t seed)
+ {
++	const uint8_t * data = (const uint8_t*)key;
++	const size_t nblocks = len / 4;
+ 
+-#define MURMUR_BLOCK() {\
+-	k1 *= c1; \
+-	k1 = git__rotl(k1,11);\
+-	k1 *= c2;\
+-	h1 ^= k1;\
+-	h1 = h1*3 + 0x52dce729;\
+-	c1 = c1*5 + 0x7b7d159c;\
+-	c2 = c2*5 + 0x6bce6396;\
+-}
+-
+-	const uint8_t *data = (const uint8_t*)key;
+-	const int nblocks = len / 4;
++	uint32_t h1 = seed;
+ 
+-	const uint32_t *blocks = (const uint32_t *)(data + nblocks * 4);
+-	const uint8_t *tail = (const uint8_t *)(data + nblocks * 4);
+-
+-	uint32_t h1 = 0x971e137b ^ seed;
+-	uint32_t k1;
+-
+-	uint32_t c1 = 0x95543787;
+-	uint32_t c2 = 0x2ad7eb25;
+-
+-	int i;
+-
+-	for (i = -nblocks; i; i++) {
+-		k1 = blocks[i];
+-		MURMUR_BLOCK();
++	const uint32_t c1 = 0xcc9e2d51;
++	const uint32_t c2 = 0x1b873593;
++	size_t i;
++	uint32_t k1 = 0;
++	const uint8_t *tail;
++
++	for(i = 0; i < nblocks; i++)
++	{
++	k1 = (uint32_t)data[i*4] |
++			(uint32_t)data[i*4 + 1] << 8 |
++			(uint32_t)data[i*4 + 2] << 16 |
++			(uint32_t)data[i*4 + 3] << 24;
++
++	k1 *= c1;
++	k1 = git__rotl(k1, 15);
++	k1 *= c2;
++
++	h1 ^= k1;
++	h1 = git__rotl(h1, 13);
++	h1 = h1*5+0xe6546b64;
+ 	}
+ 
++	tail = (const uint8_t*)(data + nblocks*4);
+ 	k1 = 0;
+ 
+-	switch(len & 3) {
+-	case 3: k1 ^= tail[2] << 16;
+-		/* fall through */
+-	case 2: k1 ^= tail[1] << 8;
+-		/* fall through */
++	switch(len & 3)
++	{
++	case 3:
++	k1 ^= tail[2] << 16;
++	/*fallthrough*/
++	case 2:
++	k1 ^= tail[1] << 8;
++	/*fallthrough*/
+ 	case 1: k1 ^= tail[0];
+-		MURMUR_BLOCK();
+-	}
++			k1 *= c1;
++			k1 = git__rotl(k1, 15);
++			k1 *= c2;
++			h1 ^= k1;
++	};
+ 
+ 	h1 ^= len;
+ 	h1 ^= h1 >> 16;
+@@ -535,7 +569,6 @@ uint32_t git__hash(const void *key, int len, uint32_t seed)
+ 
+ 	return h1;
+ }
+-#endif
+ 
+ /**
+  * A modified `bsearch` from the BSD glibc.
+diff --git a/src/util/util.h b/src/util/util.h
+index d3cbbf4dd..3a073ca64 100644
+--- a/src/util/util.h
++++ b/src/util/util.h
+@@ -69,7 +69,8 @@ extern int git__strntol64(int64_t *n, const char *buff, size_t buff_len, const c
+ 
+ 
+ extern void git__hexdump(const char *buffer, size_t n);
+-extern uint32_t git__hash(const void *key, int len, uint32_t seed);
++extern uint32_t git__hash(const void *key, size_t len, uint32_t seed);
++extern uint32_t git__hash_v2(const void *key, size_t len, uint32_t seed);
+ 
+ /* 32-bit cross-platform rotl */
+ #ifdef _MSC_VER /* use built-in method in MSVC */
+diff --git a/tests/libgit2/graph/murmur3.c b/tests/libgit2/graph/murmur3.c
+new file mode 100644
+index 000000000..87c4a18e5
+--- /dev/null
++++ b/tests/libgit2/graph/murmur3.c
+@@ -0,0 +1,101 @@
++#include "clar_libgit2.h"
++
++#include "util.h"
++
++/*
++ * Vectors below tests both v1 and v2 used in git. v1 and v2 agree
++ * on pure-ASCII input; they diverge once a byte >= 0x80 is involved, which is
++ * the sign-extension bug bloom_filter_hash_version == 1 needs for git
++ * compatibility.
++ */
++
++#define SEED1 0x293ae76fu
++#define SEED2 0x7e646e2cu
++
++static void assert_v1(const char *data, int len, uint32_t expected_h1, uint32_t expected_h2)
++{
++	cl_assert_equal_i(git__hash(data, len, SEED1), expected_h1);
++	cl_assert_equal_i(git__hash(data, len, SEED2), expected_h2);
++}
++
++static void assert_v2(const char *data, int len, uint32_t expected_h1, uint32_t expected_h2)
++{
++	cl_assert_equal_i(git__hash_v2(data, len, SEED1), expected_h1);
++	cl_assert_equal_i(git__hash_v2(data, len, SEED2), expected_h2);
++}
++
++void test_graph_murmur3__v1_empty(void)
++{
++	assert_v1("", 0, 0x5615800cu, 0x0580e554u);
++}
++
++void test_graph_murmur3__v2_empty(void)
++{
++	assert_v2("", 0, 0x5615800cu, 0x0580e554u);
++}
++
++void test_graph_murmur3__v1_ascii(void)
++{
++	assert_v1("a", 1, 0x8fc5291au, 0xf720b3beu);
++	assert_v1("README", 6, 0x8003a218u, 0x02765271u);
++	assert_v1("src/main.c", 10, 0xa27007c1u, 0xdb9c22cau);
++}
++
++void test_graph_murmur3__v2_ascii(void)
++{
++	assert_v2("a", 1, 0x8fc5291au, 0xf720b3beu);
++	assert_v2("README", 6, 0x8003a218u, 0x02765271u);
++	assert_v2("src/main.c", 10, 0xa27007c1u, 0xdb9c22cau);
++}
++
++/*
++ * "docs/caf\xc3\xa9.txt" contains the UTF-8 encoding of "café.txt",
++ * whose continuation bytes are >= 0x80.
++ */
++void test_graph_murmur3__v1_high_bit_tail(void)
++{
++	static const char data[] = "docs/caf\xc3\xa9.txt";
++	assert_v1(data, sizeof(data) - 1, 0x669bbcf2u, 0x7c7e0706u);
++}
++
++void test_graph_murmur3__v2_high_bit_tail(void)
++{
++	static const char data[] = "docs/caf\xc3\xa9.txt";
++	assert_v2(data, sizeof(data) - 1, 0x43eb492bu, 0xf0def225u);
++}
++
++void test_graph_murmur3__v1_high_bit_full_block(void)
++{
++	static const char data[] = "\xff\xfe\xfd\xfc";
++	assert_v1(data, sizeof(data) - 1, 0xffef0993u, 0x1b924c27u);
++}
++
++void test_graph_murmur3__v2_high_bit_full_block(void)
++{
++	static const char data[] = "\xff\xfe\xfd\xfc";
++	assert_v2(data, sizeof(data) - 1, 0xff1db74cu, 0xa592c26du);
++}
++
++void test_graph_murmur3__v1_high_bit_short_tail(void)
++{
++	static const char data[] = "\x80";
++	assert_v1(data, sizeof(data) - 1, 0xa0eaf9dau, 0xffbda735u);
++}
++
++void test_graph_murmur3__v2_high_bit_short_tail(void)
++{
++	static const char data[] = "\x80";
++	assert_v2(data, sizeof(data) - 1, 0x06cff4c0u, 0x081434bcu);
++}
++
++/*
++ * Once a byte >= 0x80 is involved, v1 and v2 must disagree, at the very least
++  * for platforms where char is signed. Lets test for that clash  to ensure 
++  * bloom_filter_hash_version == 1 works
++ */
++void test_graph_murmur3__v1_and_v2_diverge_on_high_bit_input(void)
++{
++	static const char data[] = "\x80";
++	cl_assert(git__hash(data, sizeof(data) - 1, SEED1) !=
++		git__hash_v2(data, sizeof(data) - 1, SEED1));
++}
+diff --git a/tests/libgit2/revwalk/pathspec.c b/tests/libgit2/revwalk/pathspec.c
+index e827fb833..9db1b8d50 100644
+--- a/tests/libgit2/revwalk/pathspec.c
++++ b/tests/libgit2/revwalk/pathspec.c
+@@ -1,4 +1,5 @@
+ #include "clar_libgit2.h"
++#include "pathspec_helpers.h"
+ 
+ static git_repository *repo;
+ 
+@@ -12,34 +13,40 @@ void test_revwalk_pathspec__cleanup(void)
+ 	cl_git_sandbox_cleanup();
+ }
+ 
++void test_revwalk_pathspec__cases(void)
++{
++	pathspec_run_cases(repo);
++}
++
+ /**
+- * $ git log -- README
+- * Lists commits 
+- * 4a202b346bb0fb0db7eff3cffeb3c70babbd2045
+- * 8496071c1b46c854b31185ea97743be6a8774479
++ * Changing the pathspec mid-walk resets iteration and applies the new
++ * filter from scratch, rather than mixing results from both filters.
+  */
+-static const char *expected_exact_str[] = {
+-	"4a202b346bb0fb0db7eff3cffeb3c70babbd2045",
+-	"8496071c1b46c854b31185ea97743be6a8774479",
+-};
+-
+-void test_revwalk_pathspec__exact_file(void)
++void test_revwalk_pathspec__change_pathspec_mid_walk(void)
+ {
+ 	git_revwalk *walk;
+-	git_pathspec *ps = NULL;
++	git_pathspec *ps_wildcard = NULL, *ps_exact = NULL;
+ 	git_oid id, expected[2];
+ 	int i, error;
+-	char *path = "README";
+-	git_strarray paths = { NULL, 1 };
+-	paths.strings = &path;
++	char *wildcard_path = "*.txt";
++	char *exact_path = "README";
++	git_strarray wildcard_paths = { NULL, 1 };
++	git_strarray exact_paths = { NULL, 1 };
++	wildcard_paths.strings = &wildcard_path;
++	exact_paths.strings = &exact_path;
+ 
+-	for (i = 0; i < 2; i++) {
+-		git_oid_from_string(&expected[i], expected_exact_str[i], GIT_OID_SHA1);
+-	}
++	for (i = 0; i < 2; i++)
++		git_oid_from_string(&expected[i], pathspec_expected_exact_str[i], GIT_OID_SHA1);
+ 
+ 	cl_git_pass(git_revwalk_new(&walk, repo));
+-	cl_git_pass(git_pathspec_new(&ps, &paths));
+-	cl_git_pass(git_revwalk_pathspec(walk, ps));
++	cl_git_pass(git_pathspec_new(&ps_wildcard, &wildcard_paths));
++	cl_git_pass(git_pathspec_new(&ps_exact, &exact_paths));
++
++	cl_git_pass(git_revwalk_pathspec(walk, ps_wildcard));
++	cl_git_pass(git_revwalk_push_head(walk));
++	cl_git_pass(git_revwalk_next(&id, walk));
++
++	cl_git_pass(git_revwalk_pathspec(walk, ps_exact));
+ 	cl_git_pass(git_revwalk_push_head(walk));
+ 
+ 	i = 0;
+@@ -52,43 +59,32 @@ void test_revwalk_pathspec__exact_file(void)
+ 	cl_assert_equal_i(error, GIT_ITEROVER);
+ 
+ 	git_revwalk_free(walk);
+-	git_pathspec_free(ps);
++	git_pathspec_free(ps_wildcard);
++	git_pathspec_free(ps_exact);
+ }
+ 
+ /**
+- * $ git log -- *.txt
+- * Lists commits 
+- * a65fedf39aefe402d3bb6e24df4d4f5fe4547750
+- * be3563ae3f795b2b4353bcce3a527ad0a4f7f644
+- * c47800c7266a2be04c571c04d5a6614691ea99bd
+- * 9fd738e8f7967c078dceed8190330fc8648ee56a
+- * 5b5b025afb0b4c913b4c338a42934a3863bf3644
++ * git_revwalk_pathspec(walk, NULL) clears a previously set pathspec, so a
++ * subsequent walk returns the full, unfiltered history again.
+  */
+-static const char *expected_wildcard_str[] = {
+-	"a65fedf39aefe402d3bb6e24df4d4f5fe4547750",
+-	"be3563ae3f795b2b4353bcce3a527ad0a4f7f644",
+-	"c47800c7266a2be04c571c04d5a6614691ea99bd",
+-	"9fd738e8f7967c078dceed8190330fc8648ee56a",
+-	"5b5b025afb0b4c913b4c338a42934a3863bf3644",
+-};
+-
+-void test_revwalk_pathspec__wildcard(void)
++void test_revwalk_pathspec__clear_pathspec(void)
+ {
+ 	git_revwalk *walk;
+ 	git_pathspec *ps = NULL;
+-	git_oid id, expected[5];
++	git_oid id, expected[7];
+ 	int i, error;
+-	char *path = "*.txt";
++	char *path = "README";
+ 	git_strarray paths = { NULL, 1 };
+ 	paths.strings = &path;
+ 
+-	for (i = 0; i < 5; i++) {
+-		git_oid_from_string(&expected[i], expected_wildcard_str[i], GIT_OID_SHA1);
+-	}
++	for (i = 0; i < 7; i++)
++		git_oid_from_string(&expected[i], pathspec_expected_all_str[i], GIT_OID_SHA1);
+ 
+ 	cl_git_pass(git_revwalk_new(&walk, repo));
+ 	cl_git_pass(git_pathspec_new(&ps, &paths));
+ 	cl_git_pass(git_revwalk_pathspec(walk, ps));
++
++	cl_git_pass(git_revwalk_pathspec(walk, NULL));
+ 	cl_git_pass(git_revwalk_push_head(walk));
+ 
+ 	i = 0;
+@@ -97,9 +93,34 @@ void test_revwalk_pathspec__wildcard(void)
+ 		i++;
+ 	}
+ 
+-	cl_assert_equal_i(i, 5);
++	cl_assert_equal_i(i, 7);
+ 	cl_assert_equal_i(error, GIT_ITEROVER);
+ 
+ 	git_revwalk_free(walk);
+ 	git_pathspec_free(ps);
+ }
++
++/**
++ * Verify that we don't error out looking for bloom filter in a repo without
++ * commit graph
++ */
++void test_revwalk_pathspec__no_commit_graph(void)
++{
++	git_repository *bare_repo;
++	git_revwalk *walk;
++	git_pathspec *ps = NULL;
++	char *path = "README";
++	git_strarray paths = { NULL, 1 };
++	paths.strings = &path;
++
++	cl_git_pass(git_repository_open(&bare_repo, cl_fixture("empty_bare.git")));
++
++	cl_git_pass(git_revwalk_new(&walk, bare_repo));
++	cl_git_pass(git_pathspec_new(&ps, &paths));
++
++	cl_git_pass(git_revwalk_pathspec(walk, ps));
++
++	git_revwalk_free(walk);
++	git_pathspec_free(ps);
++	git_repository_free(bare_repo);
++}
+diff --git a/tests/libgit2/revwalk/pathspec_bloom.c b/tests/libgit2/revwalk/pathspec_bloom.c
+new file mode 100644
+index 000000000..1c2689f1d
+--- /dev/null
++++ b/tests/libgit2/revwalk/pathspec_bloom.c
+@@ -0,0 +1,28 @@
++#include "clar_libgit2.h"
++#include "pathspec_helpers.h"
++
++/**
++ * Same fixture as revwalk::pathspec, but with a commit-graph generated by
++ * `git commit-graph write --reachable --changed-paths`, so it carries real
++ * changed-path Bloom filters. The commit history and OIDs are identical to
++ * testrepo.git; only the derived commit-graph differs. These tests reuse
++ * the exact same expectations (from pathspec_helpers) to confirm the
++ * Bloom-filter fast path in git_revwalk_next() never disagrees with the
++ * pathspec tree-diff fallback.
++ */
++static git_repository *repo;
++
++void test_revwalk_pathspec_bloom__initialize(void)
++{
++	repo = cl_git_sandbox_init("testrepo_bloom.git");
++}
++
++void test_revwalk_pathspec_bloom__cleanup(void)
++{
++	cl_git_sandbox_cleanup();
++}
++
++void test_revwalk_pathspec_bloom__cases(void)
++{
++	pathspec_run_cases(repo);
++}
+diff --git a/tests/libgit2/revwalk/pathspec_helpers.c b/tests/libgit2/revwalk/pathspec_helpers.c
+new file mode 100644
+index 000000000..96e90b67a
+--- /dev/null
++++ b/tests/libgit2/revwalk/pathspec_helpers.c
+@@ -0,0 +1,164 @@
++#include "pathspec_helpers.h"
++
++static char *pattern_readme[] = { "README" };
++static char *pattern_wildcard_txt[] = { "*.txt" };
++static char *pattern_no_match[] = { "does-not-exist.xyz" };
++static char *pattern_directory_ab[] = { "ab" };
++static char *pattern_wildcard_with_prefix[] = { "ab/*.txt" };
++static char *pattern_multiple[] = { "README", "*.txt" };
++static char *pattern_branch_file[] = { "branch_file.txt" };
++
++/**
++ * $ git log -- README
++ * Lists commits
++ * 4a202b346bb0fb0db7eff3cffeb3c70babbd2045
++ * 8496071c1b46c854b31185ea97743be6a8774479
++ */
++const char *pathspec_expected_exact_str[2] = {
++	"4a202b346bb0fb0db7eff3cffeb3c70babbd2045",
++	"8496071c1b46c854b31185ea97743be6a8774479",
++};
++
++/**
++ * $ git log -- *.txt
++ * Lists commits
++ * a65fedf39aefe402d3bb6e24df4d4f5fe4547750
++ * be3563ae3f795b2b4353bcce3a527ad0a4f7f644
++ * c47800c7266a2be04c571c04d5a6614691ea99bd
++ * 9fd738e8f7967c078dceed8190330fc8648ee56a
++ * 5b5b025afb0b4c913b4c338a42934a3863bf3644
++ */
++static const char *expected_wildcard_str[] = {
++	"a65fedf39aefe402d3bb6e24df4d4f5fe4547750",
++	"be3563ae3f795b2b4353bcce3a527ad0a4f7f644",
++	"c47800c7266a2be04c571c04d5a6614691ea99bd",
++	"9fd738e8f7967c078dceed8190330fc8648ee56a",
++	"5b5b025afb0b4c913b4c338a42934a3863bf3644",
++};
++
++/**
++ * $ git log --oneline subtrees -- ab
++ * Lists commit
++ * 763d71aadf09a7951596c9746c024e7eece7c7af
++ */
++static const char *expected_directory_str[] = {
++	"763d71aadf09a7951596c9746c024e7eece7c7af",
++};
++
++/**
++ * $ git log --oneline HEAD -- README '*.txt'
++ * Lists the union of the exact_file and wildcard commits, which happens to
++ * be every commit reachable from HEAD in this fixture.
++ *
++ * $ git rev-list --count HEAD
++ * 7
++ */
++const char *pathspec_expected_all_str[7] = {
++	"a65fedf39aefe402d3bb6e24df4d4f5fe4547750",
++	"be3563ae3f795b2b4353bcce3a527ad0a4f7f644",
++	"c47800c7266a2be04c571c04d5a6614691ea99bd",
++	"9fd738e8f7967c078dceed8190330fc8648ee56a",
++	"4a202b346bb0fb0db7eff3cffeb3c70babbd2045",
++	"5b5b025afb0b4c913b4c338a42934a3863bf3644",
++	"8496071c1b46c854b31185ea97743be6a8774479",
++};
++
++/**
++ * be3563a "Merge branch 'br2'" only touches branch_file.txt relative to one
++ * of its two parents (it is unchanged versus c47800c). It must not show up
++ * when walking history for that path, since a merge only counts as a change
++ * when it differs from *every* parent.
++ *
++ * $ git log --oneline refs/remotes/test/master -- branch_file.txt
++ * Lists commit
++ * c47800c7266a2be04c571c04d5a6614691ea99bd
++ */
++static const char *expected_merge_single_parent_str[] = {
++	"c47800c7266a2be04c571c04d5a6614691ea99bd",
++};
++
++const pathspec_case pathspec_cases[] = {
++	{ "exact_file", NULL, pattern_readme, 1,
++		pathspec_expected_exact_str, 2 },
++	{ "wildcard", NULL, pattern_wildcard_txt, 1,
++		expected_wildcard_str, 5 },
++	{ "no_match", NULL, pattern_no_match, 1,
++		NULL, 0 },
++	{ "directory", "refs/heads/subtrees", pattern_directory_ab, 1,
++		expected_directory_str, 1 },
++	{ "wildcard_with_prefix", "refs/heads/subtrees", pattern_wildcard_with_prefix, 1,
++		expected_directory_str, 1 },
++	{ "multiple_patterns", NULL, pattern_multiple, 2,
++		pathspec_expected_all_str, 7 },
++	{ "merge_commit_single_parent_touches", "refs/remotes/test/master",
++		pattern_branch_file, 1, expected_merge_single_parent_str, 1 },
++};
++const size_t pathspec_cases_count = ARRAY_SIZE(pathspec_cases);
++
++void pathspec_assert_walk(
++	git_repository *repo,
++	const char *name,
++	const char *pushref,
++	char **patterns,
++	size_t pattern_count,
++	const char **expected_oid_strs,
++	size_t expected_count)
++{
++	git_revwalk *walk;
++	git_pathspec *ps = NULL;
++	git_oid id, expected;
++	char id_str[GIT_OID_MAX_HEXSIZE + 1], expected_str[GIT_OID_MAX_HEXSIZE + 1];
++	size_t i;
++	int error;
++	git_strarray paths = { NULL, 0 };
++	paths.strings = patterns;
++	paths.count = pattern_count;
++
++	cl_git_pass(git_revwalk_new(&walk, repo));
++	cl_git_pass(git_pathspec_new(&ps, &paths));
++	cl_git_pass(git_revwalk_pathspec(walk, ps));
++
++	if (pushref)
++		cl_git_pass(git_revwalk_push_ref(walk, pushref));
++	else
++		cl_git_pass(git_revwalk_push_head(walk));
++
++	i = 0;
++	while ((error = git_revwalk_next(&id, walk)) == 0) {
++		if (i >= expected_count) {
++			git_oid_tostr(id_str, sizeof(id_str), &id);
++			cl_failf("case '%s': unexpected extra result %s", name, id_str);
++		}
++
++		cl_git_pass(git_oid_from_string(&expected, expected_oid_strs[i], GIT_OID_SHA1));
++		if (!git_oid_equal(&expected, &id)) {
++			git_oid_tostr(id_str, sizeof(id_str), &id);
++			git_oid_tostr(expected_str, sizeof(expected_str), &expected);
++			cl_failf("case '%s': result %d: expected %s, got %s",
++				name, (int)i, expected_str, id_str);
++		}
++		i++;
++	}
++
++	if (i != expected_count)
++		cl_failf("case '%s': expected %d results, got %d",
++			name, (int)expected_count, (int)i);
++	if (error != GIT_ITEROVER)
++		cl_failf("case '%s': walk ended with error %d, expected GIT_ITEROVER",
++			name, error);
++
++	git_revwalk_free(walk);
++	git_pathspec_free(ps);
++}
++
++void pathspec_run_cases(git_repository *repo)
++{
++	size_t i;
++
++	for (i = 0; i < pathspec_cases_count; i++) {
++		const pathspec_case *c = &pathspec_cases[i];
++		pathspec_assert_walk(repo, c->name, c->pushref,
++			c->patterns, c->pattern_count,
++			c->expected_oid_strs, c->expected_count);
++	}
++}
+diff --git a/tests/libgit2/revwalk/pathspec_helpers.h b/tests/libgit2/revwalk/pathspec_helpers.h
+new file mode 100644
+index 000000000..5f0415675
+--- /dev/null
++++ b/tests/libgit2/revwalk/pathspec_helpers.h
+@@ -0,0 +1,45 @@
++#ifndef INCLUDE_revwalk_pathspec_helpers_h__
++#define INCLUDE_revwalk_pathspec_helpers_h__
++
++#include "clar_libgit2.h"
++
++/**
++ * A single pathspec-walk scenario: push `pushref` (or HEAD, if NULL),
++ * filter by a pathspec built from `patterns`, and expect exactly
++ * `expected_oid_strs` back, in order.
++ *
++ * All scenarios here are independent of whether the repo's commit-graph
++ * carries changed-path Bloom filters, so they're defined once and run
++ * against both revwalk::pathspec (no Bloom data) and revwalk::pathspec::bloom
++ * (real Bloom data) via pathspec_run_cases().
++ */
++typedef struct {
++	const char *name;
++	const char *pushref;
++	char **patterns;
++	size_t pattern_count;
++	const char **expected_oid_strs;
++	size_t expected_count;
++} pathspec_case;
++
++extern const pathspec_case pathspec_cases[];
++extern const size_t pathspec_cases_count;
++
++/* Shared expected-oid lists, also reused by lifecycle tests that only make
++ * sense without Bloom filters (changing/clearing the pathspec mid-walk). */
++extern const char *pathspec_expected_exact_str[2];
++extern const char *pathspec_expected_all_str[7];
++
++void pathspec_assert_walk(
++	git_repository *repo,
++	const char *name,
++	const char *pushref,
++	char **patterns,
++	size_t pattern_count,
++	const char **expected_oid_strs,
++	size_t expected_count);
++
++/* Runs every scenario in pathspec_cases against `repo`. */
++void pathspec_run_cases(git_repository *repo);
++
++#endif

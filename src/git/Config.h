@@ -54,6 +54,9 @@ public:
     friend class Config;
   };
 
+  // Lowest priority, so any real git config file overrides Pawmmit's defaults.
+  static constexpr auto kDefaultsLevel = static_cast<git_config_level_t>(0);
+
   bool isValid() const { return d != nullptr; }
 
   bool addFile(const QString &path,

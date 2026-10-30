@@ -1,0 +1,7 @@
+[wrap-file]
+directory = libgit2-2.0.0-rc.1
+source_url = https://github.com/libgit2/libgit2/archive/refs/tags/v2.0.0-rc.1.tar.gz
+source_filename = libgit2-2.0.0-rc.1.tar.gz
+source_hash = c8b3af8b6b1aa70d83da5dee39142df2b9959087b4dd2a302e6edfea354dd1b2
+diff_files = libgit2-0001-use-bloom-filter.patch, libgit2-0002-topological-walk-performance.patch
+method = cmake

@@ -35,8 +35,10 @@ public:
   bool push(const Commit &commit);
   bool push(const Reference &ref);
 
-  // Return the next commit that matches the given pathspec.
-  Commit next(const QString &pathspec = QString()) const;
+  // Only return commits that touch the given path; this can't be undone.
+  bool setPathspec(const QString &pathspec);
+
+  Commit next() const;
 
   // True once next() has returned every commit, rather than stopping early on
   // an error.
@@ -45,7 +47,11 @@ public:
 protected:
   RevWalk(git_revwalk *walker);
 
-  std::shared_ptr<git_revwalk> d;
+  // Null for an invalid walk, which libgit2 rejects with an error.
+  git_revwalk *walk() const;
+
+  struct Data;
+  std::shared_ptr<Data> d;
   mutable bool mFinished = false;
 
   friend class Commit;

@@ -1,0 +1,392 @@
+diff --git a/src/libgit2/commit_graph.c b/src/libgit2/commit_graph.c
+index 956c7dbb3..801a314ee 100644
+--- a/src/libgit2/commit_graph.c
++++ b/src/libgit2/commit_graph.c
+@@ -19,7 +19,6 @@
+ 
+ #define GIT_COMMIT_GRAPH_MISSING_PARENT 0x70000000
+ #define GIT_COMMIT_GRAPH_GENERATION_NUMBER_MAX 0x3FFFFFFF
+-#define GIT_COMMIT_GRAPH_GENERATION_NUMBER_INFINITY 0xFFFFFFFF
+ 
+ #define COMMIT_GRAPH_SIGNATURE 0x43475048 /* "CGPH" */
+ #define COMMIT_GRAPH_VERSION 1
+diff --git a/src/libgit2/commit_graph.h b/src/libgit2/commit_graph.h
+index 119670851..dcdfbd791 100644
+--- a/src/libgit2/commit_graph.h
++++ b/src/libgit2/commit_graph.h
+@@ -19,6 +19,8 @@
+ #include "oid.h"
+ #include "hash.h"
+ 
++#define GIT_COMMIT_GRAPH_GENERATION_NUMBER_INFINITY 0xFFFFFFFF
++
+ /**
+  * A commit-graph file.
+  *
+diff --git a/src/libgit2/commit_list.c b/src/libgit2/commit_list.c
+index 7f00c483f..793b93d10 100644
+--- a/src/libgit2/commit_list.c
++++ b/src/libgit2/commit_list.c
+@@ -12,22 +12,37 @@
+ #include "odb.h"
+ #include "commit.h"
+ 
++uint32_t git_commit_list_generation(const git_commit_list_node *commit)
++{
++	/* Commits outside the graph is assigned infinity */
++	return commit->generation ?
++		commit->generation : GIT_COMMIT_GRAPH_GENERATION_NUMBER_INFINITY;
++}
++
+ int git_commit_list_generation_cmp(const void *a, const void *b)
+ {
+-	uint32_t generation_a = ((git_commit_list_node *) a)->generation;
+-	uint32_t generation_b = ((git_commit_list_node *) b)->generation;
++	uint32_t generation_a = ((const git_commit_list_node *) a)->generation;
++	uint32_t generation_b = ((const git_commit_list_node *) b)->generation;
+ 
+-	if (!generation_a || !generation_b) {
+-		/* Fall back to comparing by timestamps if at least one commit lacks a generation. */
++	if (!generation_a && !generation_b) {
++		/* Fall back to comparing by timestamps if both commits lacks a generation. */
+ 		return git_commit_list_time_cmp(a, b);
+ 	}
+ 
++	/*
++	 * At least one commit has a finite generation number,
++	 * but the other one might be infinity
++	 */
++	generation_a = git_commit_list_generation((const git_commit_list_node *) a);
++	generation_b = git_commit_list_generation((const git_commit_list_node *) b);
++
+ 	if (generation_a < generation_b)
+ 		return 1;
+ 	if (generation_a > generation_b)
+ 		return -1;
+ 
+-	return 0;
++	/* Make commit time the tie breaker */
++	return git_commit_list_time_cmp(a, b);
+ }
+ 
+ int git_commit_list_time_cmp(const void *a, const void *b)
+diff --git a/src/libgit2/commit_list.h b/src/libgit2/commit_list.h
+index e2dbd2aae..7e7c4f065 100644
+--- a/src/libgit2/commit_list.h
++++ b/src/libgit2/commit_list.h
+@@ -32,6 +32,7 @@ typedef struct git_commit_list_node {
+ 			 topo_delay:1,
+ 			 parsed:1,
+ 			 added:1,
++			 discovered:1,
+ 			 flags : FLAG_BITS;
+ 
+ 	uint16_t in_degree;
+@@ -46,6 +47,7 @@ typedef struct git_commit_list {
+ } git_commit_list;
+ 
+ git_commit_list_node *git_commit_list_alloc_node(git_revwalk *walk);
++uint32_t git_commit_list_generation(const git_commit_list_node *commit);
+ int git_commit_list_generation_cmp(const void *a, const void *b);
+ int git_commit_list_time_cmp(const void *a, const void *b);
+ void git_commit_list_free(git_commit_list **list_p);
+diff --git a/src/libgit2/revwalk.c b/src/libgit2/revwalk.c
+index a67fa3c2b..dab05231f 100644
+--- a/src/libgit2/revwalk.c
++++ b/src/libgit2/revwalk.c
+@@ -673,13 +673,6 @@ static int limit_list(git_commit_list **out, git_revwalk *walk, git_commit_list
+ 			break;
+ 		}
+ 
+-		/* Use bloom filter if available */
+-		if (walk->pathspec_cache && check_bloom_filter(walk, commit) == 0)
+-			continue;
+-		
+-		if (walk->pathspec && !include_path(walk, commit))
+-			continue;
+-
+ 		if (walk->hide_cb && walk->hide_cb(&commit->oid, walk->hide_cb_payload))
+ 			continue;
+ 
+@@ -802,6 +795,192 @@ cleanup:
+ 	return error;
+ }
+ 
++/*
++ * Start tracking a commit whose children have not all been counted yet.
++ * Keeps any edges already counted from children that are non-first-parent
++ */
++static int add_to_topo_set(git_revwalk *walk, git_commit_list_node *commit)
++{
++	commit->discovered = 1;
++	commit->in_degree++;
++	return git_pqueue_insert(&walk->uncounted, commit);
++}
++
++static int count_parents(git_revwalk *walk, git_commit_list_node *commit)
++{
++	unsigned short i;
++	int error;
++
++	for (i = 0; i < commit->out_degree; i++) {
++		git_commit_list_node *parent = commit->parents[i];
++
++		/*
++		 * Count the edge in all cases to ensure no parent is emitted before
++		 * its children. Only follow the first parent when asked to.
++		 * This potentially deviates from git, but retains prior libgit2 behaviour
++		 */
++		parent->in_degree++;
++
++		if (walk->first_parent == 0 || i == 0) {
++			if ((error = git_commit_list_parse(walk, parent)) < 0)
++				return error;
++
++			if (!parent->discovered &&
++			    (error = add_to_topo_set(walk, parent)) < 0)
++				return error;
++		}
++	}
++
++	return 0;
++}
++
++/*
++ * Count parents for every commit with at least this generation; children
++ * always have a higher one
++ */
++static int count_down_to(git_revwalk *walk, uint32_t generation)
++{
++	git_commit_list_node *commit;
++	int error;
++
++	while ((commit = git_pqueue_get(&walk->uncounted, 0)) != NULL &&
++	       git_commit_list_generation(commit) >= generation) {
++		git_pqueue_pop(&walk->uncounted);
++
++		if ((error = count_parents(walk, commit)) < 0)
++			return error;
++	}
++
++	return 0;
++}
++
++/*
++ * Counting down to a candidate's generation completes its in-degree before
++ * it is emitted
++ */
++static int revwalk_next_incremental_toposort(git_commit_list_node **object_out,
++	git_revwalk *walk)
++{
++	git_commit_list_node *next;
++	unsigned short i;
++	int error;
++
++	while ((next = git_pqueue_pop(&walk->topo_queue)) != NULL) {
++		if ((error = count_down_to(walk, git_commit_list_generation(next))) < 0)
++			return error;
++
++		/* Already emitted, or counting found children that are still pending */
++		if (next->in_degree != 1)
++			continue;
++
++		for (i = 0; i < next->out_degree; i++) {
++			git_commit_list_node *parent = next->parents[i];
++
++			if (parent->in_degree == 0)
++				continue;
++
++			parent->in_degree--;
++			if (parent->in_degree == 1 &&
++			    parent->discovered &&
++			    (error = git_pqueue_insert(&walk->topo_queue, parent)) < 0) {
++				return error;
++			}
++		}
++
++		next->in_degree = 0;
++		*object_out = next;
++		return 0;
++	}
++
++	git_error_clear();
++	return GIT_ITEROVER;
++}
++
++/*
++ * Indicate whether we can use generation numbers for topological walk,
++ * i.e. prepare_incremental_toposort_walk
++ */
++static bool can_use_generation_walk(git_revwalk *walk)
++{
++	git_commit_graph_file *cgraph_file = NULL;
++
++	/* Hidden commits or callback filtering need the full walk */
++	if (!(walk->sorting & GIT_SORT_TOPOLOGICAL) ||
++	    walk->did_hide || walk->hide_cb)
++		return false;
++
++	if (git_odb__get_commit_graph_file(&cgraph_file, walk->odb) < 0) {
++		git_error_clear();
++		return false;
++	}
++
++	return true;
++}
++
++/* Prepare incremental revwalk using generation number */
++static int prepare_incremental_toposort_walk(git_revwalk *walk,
++	git_commit_list *commits)
++{
++	git_vector_cmp topo_cmp = NULL;
++	git_commit_list *list;
++	int error;
++
++	if (walk->sorting & GIT_SORT_TIME)
++		topo_cmp = git_commit_list_time_cmp;
++
++	if ((error = git_pqueue_init(&walk->topo_queue, 0, 8, topo_cmp)) < 0 ||
++	    (error = git_pqueue_init(&walk->uncounted, 0, 8,
++			git_commit_list_generation_cmp)) < 0)
++		return error;
++
++	/* Every tip is a candidate until counting shows it has children */
++	for (list = commits; list; list = list->next) {
++		if ((error = add_to_topo_set(walk, list->item)) < 0 ||
++		    (error = git_pqueue_insert(&walk->topo_queue, list->item)) < 0)
++			return error;
++	}
++
++	/* Without time sorting, emit the tips in the order they were pushed */
++	if (!topo_cmp)
++		git_pqueue_reverse(&walk->topo_queue);
++
++	walk->get_next = &revwalk_next_incremental_toposort;
++	return 0;
++}
++
++/* Prepare revwalk without using generation number */
++static int prepare_full_walk(git_revwalk *walk, git_commit_list *commits)
++{
++	git_commit_list *list;
++	int error = 0;
++
++	if (walk->limited && (error = limit_list(&commits, walk, commits)) < 0)
++		return error;
++
++	if (walk->sorting & GIT_SORT_TOPOLOGICAL) {
++		error = sort_in_topological_order(&walk->iterator_topo, walk, commits);
++		git_commit_list_free(&commits);
++
++		if (error < 0)
++			return error;
++
++		walk->get_next = &revwalk_next_toposort;
++	} else if (walk->sorting & GIT_SORT_TIME) {
++		for (list = commits; list && !error; list = list->next)
++			error = walk->enqueue(walk, list->item);
++
++		git_commit_list_free(&commits);
++
++		if (error < 0)
++			return error;
++	} else {
++		walk->iterator_rand = commits;
++		walk->get_next = revwalk_next_unsorted;
++	}
++
++	return 0;
++}
++
+ static int prepare_walk(git_revwalk *walk)
+ {
+ 	int error = 0;
+@@ -845,28 +1024,14 @@ static int prepare_walk(git_revwalk *walk)
+ 		}
+ 	}
+ 
+-	if (walk->limited && (error = limit_list(&commits, walk, commits)) < 0)
+-		return error;
+-
+-	if (walk->sorting & GIT_SORT_TOPOLOGICAL) {
+-		error = sort_in_topological_order(&walk->iterator_topo, walk, commits);
++	if (can_use_generation_walk(walk)) {
++		error = prepare_incremental_toposort_walk(walk, commits);
+ 		git_commit_list_free(&commits);
+ 
+ 		if (error < 0)
+ 			return error;
+-
+-		walk->get_next = &revwalk_next_toposort;
+-	} else if (walk->sorting & GIT_SORT_TIME) {
+-		for (list = commits; list && !error; list = list->next)
+-			error = walk->enqueue(walk, list->item);
+-
+-		git_commit_list_free(&commits);
+-
+-		if (error < 0)
+-			return error;
+-	} else {
+-		walk->iterator_rand = commits;
+-		walk->get_next = revwalk_next_unsorted;
++	} else if ((error = prepare_full_walk(walk, commits)) < 0) {
++		return error;
+ 	}
+ 
+ 	if (walk->sorting & GIT_SORT_REVERSE) {
+@@ -973,7 +1138,17 @@ int git_revwalk_next(git_oid *oid, git_revwalk *walk)
+ 			return error;
+ 	}
+ 
+-	error = walk->get_next(&next, walk);
++	/*
++	 * Filter commits by path on output to allow user code aborting the walk
++	 * early to be cheap
++	 */
++	do {
++		error = walk->get_next(&next, walk);
++		
++		/* Use bloom filter if available */
++		if (walk->pathspec_cache && check_bloom_filter(walk, next) == 0)
++			continue;
++	} while (!error && walk->pathspec && !include_path(walk, next));
+ 
+ 	if (error == GIT_ITEROVER) {
+ 		git_revwalk_reset(walk);
+@@ -1019,7 +1194,6 @@ int git_revwalk_pathspec(git_revwalk *walk, git_pathspec *pathspec) {
+ 				/* Discard the return value since git_bloom_filter__cache_new cleans up the error cases for us*/
+ 				(void)git_bloom_filter__cache_new(&walk->pathspec_cache, pathspec, walk->pathspec_cgfile);
+ 		}
+-		walk->limited = 1;
+ 	}
+ 	/* Reset previously set pathspec */ 
+ 	else if (walk->pathspec) {
+@@ -1046,10 +1220,13 @@ int git_revwalk_reset(git_revwalk *walk)
+ 		commit->topo_delay = 0;
+ 		commit->uninteresting = 0;
+ 		commit->added = 0;
++		commit->discovered = 0;
+ 		commit->flags = 0;
+ 	}
+ 
+ 	git_pqueue_clear(&walk->iterator_time);
++	git_pqueue_free(&walk->topo_queue);
++	git_pqueue_free(&walk->uncounted);
+ 	git_commit_list_free(&walk->iterator_topo);
+ 	git_commit_list_free(&walk->iterator_rand);
+ 	git_commit_list_free(&walk->iterator_reverse);
+diff --git a/src/libgit2/revwalk.h b/src/libgit2/revwalk.h
+index ccbe3de30..617fc188d 100644
+--- a/src/libgit2/revwalk.h
++++ b/src/libgit2/revwalk.h
+@@ -52,6 +52,10 @@ struct git_revwalk {
+ 	bool pathspec_wildcard;
+ 	git_bloom_filter_cache *pathspec_cache;
+ 	git_commit_graph_file *pathspec_cgfile;
++
++	/* speed-up with generation number v1 */
++	git_pqueue topo_queue;
++	git_pqueue uncounted;
+ };
+ 
+ git_commit_list_node *git_revwalk__commit_lookup(git_revwalk *walk, const git_oid *oid);

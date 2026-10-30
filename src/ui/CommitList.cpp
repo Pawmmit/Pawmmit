@@ -533,7 +533,7 @@ private:
                                const QList<QColor> &edgeColors) {
     FetchResult result;
     int i = 0;
-    git::Commit commit = walker.next(pathspec);
+    git::Commit commit = walker.next();
     while (commit.isValid()) {
       // Add root commits.
       bool root = false;
@@ -582,7 +582,7 @@ private:
       if (i++ >= 64)
         break;
 
-      commit = walker.next(pathspec);
+      commit = walker.next();
     }
 
     result.exhausted = !commit.isValid();
@@ -640,6 +640,9 @@ private:
             result.walker.push(ref);
         }
       }
+
+      if (result.walker.isValid() && !ctx.pathspec.isEmpty())
+        result.walker.setPathspec(ctx.pathspec);
     }
 
     if (result.walker.isValid()) {
