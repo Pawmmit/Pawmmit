@@ -301,7 +301,7 @@ public:
 
         bool ignoreWhitespace = Settings::instance()->isWhitespaceIgnored();
         git::Diff diff = row.commit.diff(git::Commit(), -1, ignoreWhitespace);
-        diff.findSimilar(mRepo);
+        diff.findSimilar();
         return QVariant::fromValue(diff);
       }
 
@@ -737,7 +737,7 @@ public:
         git::Commit commit = mCommits.at(index.row());
         bool ignoreWhitespace = Settings::instance()->isWhitespaceIgnored();
         git::Diff diff = commit.diff(git::Commit(), -1, ignoreWhitespace);
-        diff.findSimilar(commit.repo());
+        diff.findSimilar();
         return QVariant::fromValue(diff);
       }
 
@@ -1440,7 +1440,7 @@ git::Diff CommitList::selectedDiff() const {
   git::Commit last = indexes.last().data(CommitRole).value<git::Commit>();
   bool ignoreWhitespace = Settings::instance()->isWhitespaceIgnored();
   git::Diff diff = first.diff(last, -1, ignoreWhitespace);
-  diff.findSimilar(first.repo());
+  diff.findSimilar();
   return diff;
 }
 
@@ -2149,13 +2149,10 @@ void CommitList::dispatchSelectedDiff(const QString &file, bool spontaneous) {
               emit diffSelected(diff, file, spontaneous);
           });
 
-  // Resolve the repository here, since its registry isn't thread-safe.
-  git::Repository repo = first.repo();
-  watcher->setFuture(QtConcurrent::run([first, last, range, ignoreWhitespace,
-                                        repo] {
+  watcher->setFuture(QtConcurrent::run([first, last, range, ignoreWhitespace] {
     git::Diff diff = range ? first.diff(last, -1, ignoreWhitespace)
                            : first.diff(git::Commit(), -1, ignoreWhitespace);
-    diff.findSimilar(repo);
+    diff.findSimilar();
     return diff;
   }));
 }

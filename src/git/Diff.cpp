@@ -11,13 +11,10 @@
 //
 
 #include "Diff.h"
-#include "Config.h"
 #include "Patch.h"
-#include "Repository.h"
 #include "Debug.h"
 #include "git2/patch.h"
 #include <algorithm>
-#include <limits>
 #include <stdexcept>
 
 bool containsPath(QString &str, QString &occurence, Qt::CaseSensitivity cs) {
@@ -35,15 +32,6 @@ bool containsPath(QString &str, QString &occurence, Qt::CaseSensitivity cs) {
 }
 
 namespace git {
-
-namespace {
-
-// Regular and executable files, the same test as libgit2's GIT_MODE_ISBLOB.
-bool isBlob(uint16_t mode) {
-  return (mode & 0170000) == (GIT_FILEMODE_BLOB & 0170000);
-}
-
-} // namespace
 
 int Diff::Callbacks::progress(const git_diff *diff, const char *oldPath,
                               const char *newPath, void *payload) {
@@ -178,64 +166,13 @@ int Diff::indexOf(const QString &name) const {
 
 void Diff::merge(const Diff &diff) { git_diff_merge(d->diff, diff); }
 
-void Diff::findSimilar(const Repository &repo, bool untracked) {
-  // Matches libgit2's default for an unset or non-positive diff.renameLimit.
-  const int kDefaultRenameLimit = 1000;
-
-  if (!isValid())
-    return;
-
-  Config config = repo.gitConfig();
-  int limit = config.value<int>("diff.renameLimit", kDefaultRenameLimit);
-  if (limit <= 0)
-    limit = kDefaultRenameLimit;
-
-  // libgit2 only reads diff.renames when no other find flag is given.
-  QString renames = config.value<QString>("diff.renames", "true").toLower();
-  bool copies = !untracked && (renames == "copies" || renames == "copy");
-
-  // Count rename sources and targets
-  size_t sources = 0;
-  size_t targets = 0;
-  int count = this->count();
-  for (int i = 0; i < count; ++i) {
-    const git_diff_delta *delta = d->delta(i);
-    bool oldBlob = isBlob(delta->old_file.mode);
-    bool newBlob = isBlob(delta->new_file.mode);
-    switch (delta->status) {
-      case GIT_DELTA_DELETED:
-        sources += oldBlob;
-        break;
-      case GIT_DELTA_TYPECHANGE:
-        sources += oldBlob;
-        targets += newBlob;
-        break;
-      case GIT_DELTA_MODIFIED:
-        sources += copies && oldBlob;
-        break;
-      case GIT_DELTA_ADDED:
-        targets += newBlob;
-        break;
-      case GIT_DELTA_UNTRACKED:
-        targets += untracked && newBlob;
-        break;
-      default:
-        break;
-    }
-  }
-
+void Diff::findSimilar(bool untracked) {
   git_diff_find_options opts = GIT_DIFF_FIND_OPTIONS_INIT;
   if (untracked)
     opts.flags = GIT_DIFF_FIND_FOR_UNTRACKED;
 
-  // Skip similarity scoring when the candidate matrix exceeds the limit
-  // squared, since it loads and hashes every compared blob
-  size_t maxPairs = static_cast<size_t>(limit) * static_cast<size_t>(limit);
-  if (sources * targets > maxPairs)
-    opts.flags |= GIT_DIFF_FIND_EXACT_MATCH_ONLY;
-
-  // libgit2 applies the limit per target, which misses renames past it
-  opts.rename_limit = std::numeric_limits<size_t>::max();
+  if (!isValid())
+    return;
 
   git_diff_find_similar(d->diff, &opts);
 }

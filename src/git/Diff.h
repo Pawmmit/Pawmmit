@@ -37,7 +37,6 @@ bool containsPath(QString &str, QString &occurence,
 namespace git {
 
 class Patch;
-class Repository;
 
 class Diff {
 public:
@@ -81,7 +80,7 @@ public:
   void merge(const Diff &diff);
 
   // Detect renames, copies, etc. This is expensive.
-  void findSimilar(const Repository &repo, bool untracked = false);
+  void findSimilar(bool untracked = false);
 
   void setAllStaged(bool staged, bool yieldFocus = true);
 
