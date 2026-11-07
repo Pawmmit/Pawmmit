@@ -28,7 +28,7 @@ void TestConfig::mergetools() {
 
   // Add mergetools config file for default external merge tools.
   QString path = Settings::confDir().filePath("mergetools");
-  config.addFile(QDir::toNativeSeparators(path), GIT_CONFIG_LEVEL_PROGRAMDATA);
+  config.addFile(QDir::toNativeSeparators(path), git::Config::kDefaultsLevel);
 
   // Iterate over difftool cmd entries.
   QSet<QString> names;

@@ -91,14 +91,14 @@ QString Commit::description() const {
   if (!walk.isValid())
     return QString();
 
-  Commit commit = walk.next();
-  while (commit.isValid()) {
-    auto it = candidates.constFind(commit.id());
+  Id id = walk.nextID();
+  while (id.isValid()) {
+    auto it = candidates.constFind(id);
     if (it != candidates.constEnd()) {
-      size_t ahead = difference(commit).first;
+      size_t ahead = difference(id).first;
       return QString("%1 +%2").arg(it->name()).arg(ahead);
     } else {
-      commit = walk.next();
+      id = walk.nextID();
     }
   }
   return QString();
@@ -241,9 +241,13 @@ RevWalk Commit::walker(int sort, bool firstCommitOnly) const {
 }
 
 std::pair<size_t, size_t> Commit::difference(const Commit &commit) const {
+  return difference(commit.id());
+}
+
+std::pair<size_t, size_t> Commit::difference(const Id &other) const {
   size_t ahead = 0, behind = 0;
-  int result = git_graph_ahead_behind(
-      &ahead, &behind, git_object_owner(d.get()), id(), commit.id());
+  int result = git_graph_ahead_behind(&ahead, &behind,
+                                      git_object_owner(d.get()), id(), other);
   if (result == 0)
     return std::make_pair(ahead, behind);
   else

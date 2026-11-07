@@ -1,0 +1,300 @@
+From 0c6c4d7d46d482ed072963f5401918b523912c35 Mon Sep 17 00:00:00 2001
+From: Matthew Suozzo <matthew.suozzo@gmail.com>
+Date: Sun, 11 Oct 2026 19:39:15 -0400
+Subject: [PATCH] pack: evict delta bases least recently used first
+
+When a new base doesn't fit in a pack's delta base cache, libgit2 frees
+every cached base that isn't in use. Before 9c62aaab4 it freed the
+eight least recently used, but finding those meant scanning the whole
+cache on every eviction, and dropping everything turned out faster:
+"the most used entries are quickly back into the cache".
+
+They come back by being rebuilt, though. Each flush also discards the
+bases that later reads keep returning to, and those reads inflate them
+and apply their deltas again. That costs most when the bases in use
+are just over the limit, as when reading every file at a commit of a
+large repository.
+
+Keep the entries on a list, most recently used first, so the cache
+knows what to evict without scanning: a hit moves an entry to the
+front in constant time, and adding a base frees unused entries from
+the back only until it fits. If the entries in use leave no room,
+don't cache the base, where the old loop never ended. An entry goes on
+the list only once it is in the map, so a failure to add it there no
+longer leaves the cache counting memory it can't free. The unused
+last_usage and use_ctr go away.
+
+Reading a 60k file checkout from a 1G repo takes 12% less CPU at the
+default 16 MiB, generating patches for its last 300 commits 6% less, and
+indexing the packs of smaller repos 3-4% less.
+---
+ src/libgit2/pack.c         |  74 ++++++++++++++++--------
+ src/libgit2/pack.h         |   6 +-
+ tests/libgit2/pack/cache.c | 113 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 169 insertions(+), 24 deletions(-)
+ create mode 100644 tests/libgit2/pack/cache.c
+
+diff --git a/src/libgit2/pack.c b/src/libgit2/pack.c
+index 010c33f7848..92475eb8582 100644
+--- a/src/libgit2/pack.c
++++ b/src/libgit2/pack.c
+@@ -103,6 +103,30 @@ static int cache_init(git_pack_cache *cache)
+ 	return 0;
+ }
+ 
++static void lru_unlink(git_pack_cache *cache, git_pack_cache_entry *e)
++{
++	if (e->prev)
++		e->prev->next = e->next;
++	else
++		cache->head = e->next;
++	if (e->next)
++		e->next->prev = e->prev;
++	else
++		cache->tail = e->prev;
++	e->prev = e->next = NULL;
++}
++
++static void lru_push(git_pack_cache *cache, git_pack_cache_entry *e)
++{
++	e->prev = NULL;
++	e->next = cache->head;
++	if (cache->head)
++		cache->head->prev = e;
++	else
++		cache->tail = e;
++	cache->head = e;
++}
++
+ static git_pack_cache_entry *cache_get(git_pack_cache *cache, off64_t offset)
+ {
+ 	git_pack_cache_entry *entry = NULL;
+@@ -112,7 +136,8 @@ static git_pack_cache_entry *cache_get(git_pack_cache *cache, off64_t offset)
+ 
+ 	if (git_pack_offsetmap_get(&entry, &cache->entries, offset) == 0) {
+ 		git_atomic32_inc(&entry->refcount);
+-		entry->last_usage = cache->use_ctr++;
++		lru_unlink(cache, entry);
++		lru_push(cache, entry);
+ 	}
+ 
+ 	git_mutex_unlock(&cache->lock);
+@@ -120,20 +145,25 @@ static git_pack_cache_entry *cache_get(git_pack_cache *cache, off64_t offset)
+ 	return entry;
+ }
+ 
+-/* Run with the cache lock held */
+-static void free_lowest_entry(git_pack_cache *cache)
++/*
++ * Frees unreferenced entries, least recently used first, until `len` more
++ * bytes fit, and returns whether they do. Run with the cache lock held.
++ */
++static bool cache_make_room(git_pack_cache *cache, size_t len)
+ {
+-	git_hashmap_iter_t iter = GIT_HASHMAP_ITER_INIT;
+-	git_pack_cache_entry *entry;
+-	off64_t offset;
++	git_pack_cache_entry *e = cache->tail, *prev;
+ 
+-	while (git_pack_offsetmap_iterate(&iter, &offset, &entry, &cache->entries) == 0) {
+-		if (entry && git_atomic32_get(&entry->refcount) == 0) {
+-			cache->memory_used -= entry->raw.len;
+-			git_pack_offsetmap_remove(&cache->entries, offset);
+-			free_cache_object(entry);
+-		}
++	for (; e && cache->memory_used + len > cache->memory_limit; e = prev) {
++		prev = e->prev;
++		if (git_atomic32_get(&e->refcount) != 0)
++			continue;
++		lru_unlink(cache, e);
++		cache->memory_used -= e->raw.len;
++		git_pack_offsetmap_remove(&cache->entries, e->offset);
++		free_cache_object(e);
+ 	}
++
++	return cache->memory_used + len <= cache->memory_limit;
+ }
+ 
+ static int cache_add(
+@@ -143,7 +173,7 @@ static int cache_add(
+ 		off64_t offset)
+ {
+ 	git_pack_cache_entry *entry;
+-	int exists;
++	bool added = false;
+ 
+ 	if (base->len > GIT_PACK_CACHE_SIZE_LIMIT)
+ 		return -1;
+@@ -155,20 +185,20 @@ static int cache_add(
+ 			git__free(entry);
+ 			return -1;
+ 		}
+-		/* Add it to the cache if nobody else has */
+-		exists = git_pack_offsetmap_contains(&cache->entries, offset);
+-		if (!exists) {
+-			while (cache->memory_used + base->len > cache->memory_limit)
+-				free_lowest_entry(cache);
+-
+-			git_pack_offsetmap_put(&cache->entries, offset, entry);
++		/* Add it to the cache if nobody else has and it fits */
++		if (!git_pack_offsetmap_contains(&cache->entries, offset) &&
++		    cache_make_room(cache, base->len) &&
++		    git_pack_offsetmap_put(&cache->entries, offset, entry) == 0) {
++			entry->offset = offset;
++			lru_push(cache, entry);
+ 			cache->memory_used += entry->raw.len;
+ 
+ 			*cached_out = entry;
++			added = true;
+ 		}
+ 		git_mutex_unlock(&cache->lock);
+-		/* Somebody beat us to adding it into the cache */
+-		if (exists) {
++
++		if (!added) {
+ 			git__free(entry);
+ 			return -1;
+ 		}
+diff --git a/src/libgit2/pack.h b/src/libgit2/pack.h
+index e802d60747c..9a3dd8fc925 100644
+--- a/src/libgit2/pack.h
++++ b/src/libgit2/pack.h
+@@ -69,7 +69,9 @@ struct git_pack_idx_header {
+ };
+ 
+ typedef struct git_pack_cache_entry {
+-	size_t last_usage; /* enough? */
++	/* Neighbors in the cache's LRU list, most recently used first. */
++	struct git_pack_cache_entry *prev, *next;
++	off64_t offset;
+ 	git_atomic32 refcount;
+ 	git_rawobj raw;
+ } git_pack_cache_entry;
+@@ -100,7 +102,7 @@ GIT_HASHMAP_OID_PROTOTYPES(git_pack_oidmap, struct git_pack_entry *);
+ typedef struct {
+ 	size_t memory_used;
+ 	size_t memory_limit;
+-	size_t use_ctr;
++	git_pack_cache_entry *head, *tail; /* LRU list */
+ 	git_mutex lock;
+ 	git_pack_offsetmap entries;
+ } git_pack_cache;
+diff --git a/tests/libgit2/pack/cache.c b/tests/libgit2/pack/cache.c
+new file mode 100644
+index 00000000000..9ddc7e812de
+--- /dev/null
++++ b/tests/libgit2/pack/cache.c
+@@ -0,0 +1,113 @@
++#include "clar_libgit2.h"
++#include "mwindow.h"
++#include "pack.h"
++
++/* A copy of the pack, so that no other test has it open already. */
++#define PACK_IDX "testrepo.git/objects/pack/pack-a81e489679b7d3418f9ab594bda8ceb37dd4c695.idx"
++
++static struct git_pack_file *pack;
++static git_array_t(git_oid) ids;
++
++void test_pack_cache__initialize(void)
++{
++	cl_fixture_sandbox("testrepo.git");
++}
++
++void test_pack_cache__cleanup(void)
++{
++	if (pack) {
++		git_mwindow_put_pack(pack);
++		pack = NULL;
++	}
++	git_array_clear(ids);
++	cl_fixture_cleanup("testrepo.git");
++}
++
++static int collect_id(const git_oid *id, void *payload)
++{
++	git_oid *out = git_array_alloc(ids);
++
++	GIT_UNUSED(payload);
++	GIT_ERROR_CHECK_ALLOC(out);
++	git_oid_cpy(out, id);
++	return 0;
++}
++
++static void open_pack(void)
++{
++	cl_git_pass(git_mwindow_get_pack(&pack, PACK_IDX, GIT_OID_SHA1));
++	git_array_clear(ids);
++	cl_git_pass(git_pack_foreach_entry(pack, collect_id, NULL));
++	cl_assert(git_array_size(ids) > 0);
++}
++
++static void close_pack(void)
++{
++	git_mwindow_put_pack(pack);
++	pack = NULL;
++}
++
++static void read_all(void)
++{
++	size_t i;
++
++	for (i = 0; i < git_array_size(ids); i++) {
++		struct git_pack_entry e;
++		git_rawobj raw;
++
++		cl_git_pass(git_pack_entry_find(&e, pack, git_array_get(ids, i), GIT_OID_SHA1_HEXSIZE));
++		cl_git_pass(git_packfile_unpack(&raw, pack, &e.offset));
++		git__free(raw.data);
++	}
++}
++
++/*
++ * Every entry in the map is on the LRU list once, no entry is still in
++ * use, and the cache counts exactly the memory its entries hold.
++ */
++static void assert_cache_consistent(git_pack_cache *cache)
++{
++	git_pack_cache_entry *e, *prev = NULL;
++	size_t count = 0, used = 0;
++
++	for (e = cache->head; e; prev = e, e = e->next) {
++		cl_assert(e->prev == prev);
++		cl_assert_equal_i(0, git_atomic32_get(&e->refcount));
++		used += e->raw.len;
++		count++;
++	}
++
++	cl_assert(cache->tail == prev);
++	cl_assert_equal_sz(cache->entries.size, count);
++	cl_assert_equal_sz(cache->memory_used, used);
++	cl_assert(cache->memory_used <= cache->memory_limit);
++}
++
++void test_pack_cache__holds_bases(void)
++{
++	open_pack();
++	read_all();
++
++	cl_assert(pack->bases.memory_used > 0);
++	assert_cache_consistent(&pack->bases);
++}
++
++void test_pack_cache__evicts_to_stay_within_limit(void)
++{
++	size_t unlimited;
++
++	/* how much the cache holds when nothing has to be evicted */
++	open_pack();
++	read_all();
++	unlimited = pack->bases.memory_used;
++	close_pack();
++
++	/* half of that can only be kept by evicting */
++	open_pack();
++	pack->bases.memory_limit = unlimited / 2;
++	read_all();
++	read_all();
++
++	cl_assert(pack->bases.memory_used > 0);
++	assert_cache_consistent(&pack->bases);
++}

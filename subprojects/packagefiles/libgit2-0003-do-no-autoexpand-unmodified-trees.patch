@@ -1,0 +1,1045 @@
+From 69bf69cf54ee794fa987b97628b59bfc6e530dcb Mon Sep 17 00:00:00 2001
+From: Sergey Kazmin <Sergey.Kazmin@kaspersky.com>
+Date: Mon, 19 Aug 2024 18:44:39 +0300
+Subject: [PATCH 1/8] diff: do not autoexpand unmodified trees while
+ calculating tree to tree diff
+
+---
+ src/libgit2/diff_generate.c | 116 +++++++++++++++++++++++++++++++-----
+ 1 file changed, 102 insertions(+), 14 deletions(-)
+
+diff --git a/src/libgit2/diff_generate.c b/src/libgit2/diff_generate.c
+index 78fe510e748..35dba2d62be 100644
+--- a/src/libgit2/diff_generate.c
++++ b/src/libgit2/diff_generate.c
+@@ -802,7 +802,8 @@ static int maybe_modified_submodule(
+ 
+ static int maybe_modified(
+ 	git_diff_generated *diff,
+-	diff_in_progress *info)
++	diff_in_progress *info,
++	bool skip_pathspec_match)
+ {
+ 	git_oid noid;
+ 	git_delta_t status = GIT_DELTA_MODIFIED;
+@@ -817,8 +818,10 @@ static int maybe_modified(
+ 
+ 	git_oid_clear(&noid, diff->base.opts.oid_type);
+ 
+-	if (!diff_pathspec_match(&matched_pathspec, diff, oitem))
+-		return 0;
++	if (!skip_pathspec_match) {
++		if (!diff_pathspec_match(&matched_pathspec, diff, oitem))
++			return 0;
++	}
+ 
+ 	/* on platforms with no symlinks, preserve mode of existing symlinks */
+ 	if (S_ISLNK(omode) && S_ISREG(nmode) && new_is_workdir &&
+@@ -1042,6 +1045,37 @@ static int iterator_advance_over(
+ 	return error;
+ }
+ 
++static int iterator_expand_until_not_tree_entry(
++	const git_index_entry **entry,
++	const git_index_entry *current_entry, 
++	git_iterator *iterator)
++{
++	int error = 0;
++
++	while (current_entry && current_entry->mode == GIT_FILEMODE_TREE) {
++		if ((error = iterator_advance_into(entry, iterator)) < 0) {
++			return error;
++		}
++		current_entry = *entry;
++	}
++
++	return error;
++}
++
++static int iterators_expand_until_not_tree_entry(diff_in_progress* info) 
++{
++	int error = 0;
++
++	if ((error = iterator_expand_until_not_tree_entry(
++	             &info->oitem, info->oitem, info->old_iter)) < 0 ||
++	    (error = iterator_expand_until_not_tree_entry(
++	             &info->nitem, info->nitem, info->new_iter)) < 0) {
++		return error;
++	}
++
++	return error;
++}
++
+ static int handle_unmatched_new_item(
+ 	git_diff_generated *diff, diff_in_progress *info)
+ {
+@@ -1242,7 +1276,7 @@ static int handle_matched_item(
+ {
+ 	int error = 0;
+ 
+-	if ((error = maybe_modified(diff, info)) < 0)
++	if ((error = maybe_modified(diff, info, false)) < 0)
+ 		return error;
+ 
+ 	if (!(error = iterator_advance(&info->oitem, info->old_iter)))
+@@ -1261,6 +1295,7 @@ int git_diff__from_iterators(
+ 	git_diff_generated *diff;
+ 	diff_in_progress info = {0};
+ 	int error = 0;
++	bool dont_expand_unmodified_trees = false;
+ 
+ 	*out = NULL;
+ 
+@@ -1282,13 +1317,63 @@ int git_diff__from_iterators(
+ 	if ((error = diff_generated_apply_options(diff, opts)) < 0)
+ 		goto cleanup;
+ 
++	dont_expand_unmodified_trees = DIFF_FLAG_ISNT_SET(diff, GIT_DIFF_INCLUDE_UNMODIFIED) &&
++	                               (git_iterator_type(old_iter) == GIT_ITERATOR_TREE ||
++	                                git_iterator_type(old_iter) == GIT_ITERATOR_EMPTY) &&
++	                               (git_iterator_type(new_iter) == GIT_ITERATOR_TREE ||
++	                                git_iterator_type(new_iter) == GIT_ITERATOR_EMPTY);
++
+ 	if ((error = iterator_current(&info.oitem, old_iter)) < 0 ||
+ 		(error = iterator_current(&info.nitem, new_iter)) < 0)
+ 		goto cleanup;
+ 
+ 	/* run iterators building diffs */
+ 	while (!error && (info.oitem || info.nitem)) {
+-		int cmp;
++		int cmp = info.oitem ?
++		                  (info.nitem ? diff->base.entrycomp(info.oitem, info.nitem) : -1) :
++		                  1;
++
++		/**
++		 * If entries are equal and they are trees, then check for modified state can be
++		 * done. The check is done by 'maybe_modified'. Modified or unequal entries will be
++		 * expanded to leaf entries (blobs, links, etc.) and processed as usual.
++		 */
++		if (dont_expand_unmodified_trees) {
++			if (cmp != 0) {
++				if ((error = iterators_expand_until_not_tree_entry(&info)) < 0) {
++					goto cleanup;
++				}
++			} else if (info.oitem && info.nitem && 
++				info.oitem->mode == GIT_FILEMODE_TREE &&
++			    info.nitem->mode == GIT_FILEMODE_TREE) 
++			{
++				const size_t prev_deltas_num = git_diff_num_deltas(&diff->base);
++				if ((error = maybe_modified(diff, &info, true)) < 0)
++					goto cleanup;
++
++				if (prev_deltas_num == git_diff_num_deltas(&diff->base)) {
++					if ((error = iterator_advance(&info.oitem, info.old_iter)) < 0 ||
++					    (error = iterator_advance(&info.nitem, info.new_iter)) < 0)
++						goto cleanup;
++				} else {
++					git_diff_delta *last = git_vector_last(&diff->base.deltas);
++					git_vector_pop(&diff->base.deltas);
++					git__free(last);
++
++					if ((error = iterators_expand_until_not_tree_entry(&info)) < 0) {
++						goto cleanup;
++					}
++				}
++			}
++
++			if (error || (!info.oitem && !info.nitem)) {
++				break;
++			}
++
++			cmp = info.oitem ?
++			              (info.nitem ? diff->base.entrycomp(info.oitem, info.nitem) : -1) :
++			              1;
++		}
+ 
+ 		/* report progress */
+ 		if (opts && opts->progress_cb) {
+@@ -1299,9 +1384,6 @@ int git_diff__from_iterators(
+ 				break;
+ 		}
+ 
+-		cmp = info.oitem ?
+-			(info.nitem ? diff->base.entrycomp(info.oitem, info.nitem) : -1) : 1;
+-
+ 		/* create DELETED records for old items not matched in new */
+ 		if (cmp < 0)
+ 			error = handle_unmatched_old_item(diff, &info);
+@@ -1379,12 +1461,18 @@ int git_diff_tree_to_tree(
+ 
+ 	*out = NULL;
+ 
+-	/* for tree to tree diff, be case sensitive even if the index is
+-	 * currently case insensitive, unless the user explicitly asked
+-	 * for case insensitivity
+-	 */
+-	if (opts && (opts->flags & GIT_DIFF_IGNORE_CASE) != 0)
+-		iflag = GIT_ITERATOR_IGNORE_CASE;
++	if (opts) {
++		/* for tree to tree diff, be case sensitive even if the index is
++		 * currently case insensitive, unless the user explicitly asked
++		 * for case insensitivity
++		 */
++		if ((opts->flags & GIT_DIFF_IGNORE_CASE) != 0) {
++			iflag = GIT_ITERATOR_IGNORE_CASE;
++		}
++		if ((opts->flags & GIT_DIFF_INCLUDE_UNMODIFIED) == 0) {
++			iflag |= GIT_ITERATOR_DONT_AUTOEXPAND;
++		}
++	}
+ 
+ 	if ((error = diff_prepare_iterator_opts(&prefix, &a_opts, iflag, &b_opts, iflag, opts)) < 0 ||
+ 	    (error = git_iterator_for_tree(&a, old_tree, &a_opts)) < 0 ||
+
+From d1abdbb05b0960e7bc82c7804d4d3296422007e7 Mon Sep 17 00:00:00 2001
+From: Sergey Kazmin <Sergey.Kazmin@kaspersky.com>
+Date: Mon, 19 Aug 2024 18:56:07 +0300
+Subject: [PATCH 2/8] fix loop
+
+---
+ src/libgit2/diff_generate.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/libgit2/diff_generate.c b/src/libgit2/diff_generate.c
+index 35dba2d62be..2808c65d952 100644
+--- a/src/libgit2/diff_generate.c
++++ b/src/libgit2/diff_generate.c
+@@ -1355,6 +1355,7 @@ int git_diff__from_iterators(
+ 					if ((error = iterator_advance(&info.oitem, info.old_iter)) < 0 ||
+ 					    (error = iterator_advance(&info.nitem, info.new_iter)) < 0)
+ 						goto cleanup;
++					continue;
+ 				} else {
+ 					git_diff_delta *last = git_vector_last(&diff->base.deltas);
+ 					git_vector_pop(&diff->base.deltas);
+
+From b24d81435e9bd6cbaa623d267d216fdc3e296bf1 Mon Sep 17 00:00:00 2001
+From: Sergey Kazmin <Sergey.Kazmin@kaspersky.com>
+Date: Tue, 20 Aug 2024 12:18:19 +0300
+Subject: [PATCH 3/8] code enhancements
+
+---
+ src/libgit2/diff_generate.c | 34 ++++++++++++++++------------------
+ 1 file changed, 16 insertions(+), 18 deletions(-)
+
+diff --git a/src/libgit2/diff_generate.c b/src/libgit2/diff_generate.c
+index 2808c65d952..a15d2284263 100644
+--- a/src/libgit2/diff_generate.c
++++ b/src/libgit2/diff_generate.c
+@@ -1334,46 +1334,44 @@ int git_diff__from_iterators(
+ 		                  1;
+ 
+ 		/**
+-		 * If entries are equal and they are trees, then check for modified state can be
++		 * if entries are equal and they are trees, then check for modified state can be
+ 		 * done. The check is done by 'maybe_modified'. Modified or unequal entries will be
+ 		 * expanded to leaf entries (blobs, links, etc.) and processed as usual.
+ 		 */
+-		if (dont_expand_unmodified_trees) {
+-			if (cmp != 0) {
+-				if ((error = iterators_expand_until_not_tree_entry(&info)) < 0) {
+-					goto cleanup;
+-				}
+-			} else if (info.oitem && info.nitem && 
+-				info.oitem->mode == GIT_FILEMODE_TREE &&
+-			    info.nitem->mode == GIT_FILEMODE_TREE) 
++		if (dont_expand_unmodified_trees &&
++		    ((info.oitem && info.oitem->mode == GIT_FILEMODE_TREE) ||
++		     (info.nitem && info.nitem->mode == GIT_FILEMODE_TREE))) {
++			if (cmp == 0 && 
++				info.oitem && info.oitem->mode == GIT_FILEMODE_TREE && 
++				info.nitem && info.nitem->mode == GIT_FILEMODE_TREE) 
+ 			{
+ 				const size_t prev_deltas_num = git_diff_num_deltas(&diff->base);
+ 				if ((error = maybe_modified(diff, &info, true)) < 0)
+ 					goto cleanup;
+ 
++				/* if there are no new deltas in diff then skip to next tree entry
++				 */
+ 				if (prev_deltas_num == git_diff_num_deltas(&diff->base)) {
+ 					if ((error = iterator_advance(&info.oitem, info.old_iter)) < 0 ||
+ 					    (error = iterator_advance(&info.nitem, info.new_iter)) < 0)
+ 						goto cleanup;
+ 					continue;
+ 				} else {
++					/* if trees are different, then pop the last delta and
++					 * expand iterators until a non-tree entry is found */
+ 					git_diff_delta *last = git_vector_last(&diff->base.deltas);
+ 					git_vector_pop(&diff->base.deltas);
+ 					git__free(last);
+-
+-					if ((error = iterators_expand_until_not_tree_entry(&info)) < 0) {
+-						goto cleanup;
+-					}
+ 				}
+ 			}
+ 
+-			if (error || (!info.oitem && !info.nitem)) {
+-				break;
++			/* if entries are not equal or modified, then expand the iterators until a
++			 * non-tree entry is found */
++			if ((error = iterators_expand_until_not_tree_entry(&info)) < 0) {
++				goto cleanup;
+ 			}
+ 
+-			cmp = info.oitem ?
+-			              (info.nitem ? diff->base.entrycomp(info.oitem, info.nitem) : -1) :
+-			              1;
++			continue;
+ 		}
+ 
+ 		/* report progress */
+
+From 70e490c8bc70076cb5bd236c5fa7ab1c2f4dd97b Mon Sep 17 00:00:00 2001
+From: Sergey Kazmin <Sergey.Kazmin@kaspersky.com>
+Date: Tue, 20 Aug 2024 14:15:48 +0300
+Subject: [PATCH 4/8] improve formatting
+
+---
+ src/libgit2/diff_generate.c | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/src/libgit2/diff_generate.c b/src/libgit2/diff_generate.c
+index a15d2284263..0870ee35ce9 100644
+--- a/src/libgit2/diff_generate.c
++++ b/src/libgit2/diff_generate.c
+@@ -1329,9 +1329,8 @@ int git_diff__from_iterators(
+ 
+ 	/* run iterators building diffs */
+ 	while (!error && (info.oitem || info.nitem)) {
+-		int cmp = info.oitem ?
+-		                  (info.nitem ? diff->base.entrycomp(info.oitem, info.nitem) : -1) :
+-		                  1;
++		const int cmp = info.oitem ?
++		    (info.nitem ? diff->base.entrycomp(info.oitem, info.nitem) : -1) : 1;
+ 
+ 		/**
+ 		 * if entries are equal and they are trees, then check for modified state can be
+
+From 41fd01c540d5d62f6aa8823292e7bf195b4efbe5 Mon Sep 17 00:00:00 2001
+From: Sergey Kazmin <Sergey.Kazmin@kaspersky.com>
+Date: Wed, 28 Aug 2024 11:15:32 +0300
+Subject: [PATCH 5/8] disable pathspec match using embedded mechanism
+
+---
+ src/libgit2/diff_generate.c | 19 +++++++++++--------
+ 1 file changed, 11 insertions(+), 8 deletions(-)
+
+diff --git a/src/libgit2/diff_generate.c b/src/libgit2/diff_generate.c
+index 0870ee35ce9..bc0b28a6db7 100644
+--- a/src/libgit2/diff_generate.c
++++ b/src/libgit2/diff_generate.c
+@@ -802,8 +802,7 @@ static int maybe_modified_submodule(
+ 
+ static int maybe_modified(
+ 	git_diff_generated *diff,
+-	diff_in_progress *info,
+-	bool skip_pathspec_match)
++	diff_in_progress *info)
+ {
+ 	git_oid noid;
+ 	git_delta_t status = GIT_DELTA_MODIFIED;
+@@ -818,10 +817,8 @@ static int maybe_modified(
+ 
+ 	git_oid_clear(&noid, diff->base.opts.oid_type);
+ 
+-	if (!skip_pathspec_match) {
+-		if (!diff_pathspec_match(&matched_pathspec, diff, oitem))
+-			return 0;
+-	}
++	if (!diff_pathspec_match(&matched_pathspec, diff, oitem))
++		return 0;
+ 
+ 	/* on platforms with no symlinks, preserve mode of existing symlinks */
+ 	if (S_ISLNK(omode) && S_ISREG(nmode) && new_is_workdir &&
+@@ -1276,7 +1273,7 @@ static int handle_matched_item(
+ {
+ 	int error = 0;
+ 
+-	if ((error = maybe_modified(diff, info, false)) < 0)
++	if ((error = maybe_modified(diff, info)) < 0)
+ 		return error;
+ 
+ 	if (!(error = iterator_advance(&info->oitem, info->old_iter)))
+@@ -1345,9 +1342,15 @@ int git_diff__from_iterators(
+ 				info.nitem && info.nitem->mode == GIT_FILEMODE_TREE) 
+ 			{
+ 				const size_t prev_deltas_num = git_diff_num_deltas(&diff->base);
+-				if ((error = maybe_modified(diff, &info, true)) < 0)
++				const bool has_pathspec_match_disabled = DIFF_FLAG_IS_SET(diff, GIT_DIFF_DISABLE_PATHSPEC_MATCH);
++
++				DIFF_FLAG_SET(diff, GIT_DIFF_DISABLE_PATHSPEC_MATCH, true);
++
++				if ((error = maybe_modified(diff, &info)) < 0)
+ 					goto cleanup;
+ 
++				DIFF_FLAG_SET(diff, GIT_DIFF_DISABLE_PATHSPEC_MATCH, has_pathspec_match_disabled);
++
+ 				/* if there are no new deltas in diff then skip to next tree entry
+ 				 */
+ 				if (prev_deltas_num == git_diff_num_deltas(&diff->base)) {
+
+From 33872286c968436923a0585d05330eb0e03fd520 Mon Sep 17 00:00:00 2001
+From: Sergey Kazmin <Sergey.Kazmin@kaspersky.com>
+Date: Wed, 28 Aug 2024 12:17:49 +0300
+Subject: [PATCH 6/8] Revert "disable pathspec match using embedded mechanism"
+
+This reverts commit 41fd01c540d5d62f6aa8823292e7bf195b4efbe5.
+---
+ src/libgit2/diff_generate.c | 19 ++++++++-----------
+ 1 file changed, 8 insertions(+), 11 deletions(-)
+
+diff --git a/src/libgit2/diff_generate.c b/src/libgit2/diff_generate.c
+index bc0b28a6db7..0870ee35ce9 100644
+--- a/src/libgit2/diff_generate.c
++++ b/src/libgit2/diff_generate.c
+@@ -802,7 +802,8 @@ static int maybe_modified_submodule(
+ 
+ static int maybe_modified(
+ 	git_diff_generated *diff,
+-	diff_in_progress *info)
++	diff_in_progress *info,
++	bool skip_pathspec_match)
+ {
+ 	git_oid noid;
+ 	git_delta_t status = GIT_DELTA_MODIFIED;
+@@ -817,8 +818,10 @@ static int maybe_modified(
+ 
+ 	git_oid_clear(&noid, diff->base.opts.oid_type);
+ 
+-	if (!diff_pathspec_match(&matched_pathspec, diff, oitem))
+-		return 0;
++	if (!skip_pathspec_match) {
++		if (!diff_pathspec_match(&matched_pathspec, diff, oitem))
++			return 0;
++	}
+ 
+ 	/* on platforms with no symlinks, preserve mode of existing symlinks */
+ 	if (S_ISLNK(omode) && S_ISREG(nmode) && new_is_workdir &&
+@@ -1273,7 +1276,7 @@ static int handle_matched_item(
+ {
+ 	int error = 0;
+ 
+-	if ((error = maybe_modified(diff, info)) < 0)
++	if ((error = maybe_modified(diff, info, false)) < 0)
+ 		return error;
+ 
+ 	if (!(error = iterator_advance(&info->oitem, info->old_iter)))
+@@ -1342,15 +1345,9 @@ int git_diff__from_iterators(
+ 				info.nitem && info.nitem->mode == GIT_FILEMODE_TREE) 
+ 			{
+ 				const size_t prev_deltas_num = git_diff_num_deltas(&diff->base);
+-				const bool has_pathspec_match_disabled = DIFF_FLAG_IS_SET(diff, GIT_DIFF_DISABLE_PATHSPEC_MATCH);
+-
+-				DIFF_FLAG_SET(diff, GIT_DIFF_DISABLE_PATHSPEC_MATCH, true);
+-
+-				if ((error = maybe_modified(diff, &info)) < 0)
++				if ((error = maybe_modified(diff, &info, true)) < 0)
+ 					goto cleanup;
+ 
+-				DIFF_FLAG_SET(diff, GIT_DIFF_DISABLE_PATHSPEC_MATCH, has_pathspec_match_disabled);
+-
+ 				/* if there are no new deltas in diff then skip to next tree entry
+ 				 */
+ 				if (prev_deltas_num == git_diff_num_deltas(&diff->base)) {
+
+From 987bb9aa2b2547bea2bb8ec97f2fc8edc9c6fe73 Mon Sep 17 00:00:00 2001
+From: Sergey Kazmin <Sergey.Kazmin@kaspersky.com>
+Date: Wed, 28 Aug 2024 12:18:38 +0300
+Subject: [PATCH 7/8] default intitialization of matched_pathspec
+
+---
+ src/libgit2/diff_generate.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/libgit2/diff_generate.c b/src/libgit2/diff_generate.c
+index 0870ee35ce9..9581dc70c78 100644
+--- a/src/libgit2/diff_generate.c
++++ b/src/libgit2/diff_generate.c
+@@ -813,7 +813,7 @@ static int maybe_modified(
+ 	unsigned int nmode = nitem->mode;
+ 	bool new_is_workdir = (info->new_iter->type == GIT_ITERATOR_WORKDIR);
+ 	bool modified_uncertain = false;
+-	const char *matched_pathspec;
++	const char *matched_pathspec = NULL;
+ 	int error = 0;
+ 
+ 	git_oid_clear(&noid, diff->base.opts.oid_type);
+
+From 3a18f0d1d584b78657ffdc300b8d082a07513975 Mon Sep 17 00:00:00 2001
+From: Sergey Kazmin <cergei.kazmin@gmail.com>
+Date: Tue, 29 Sep 2026 15:44:43 +0000
+Subject: [PATCH 8/8] diff: fix skipping of unmodified trees
+
+Compare only the ids of two trees at the same path instead of calling
+maybe_modified on them.  maybe_modified passed a delta for the tree to
+the notify callback, and a callback that skipped it made the diff skip
+the whole tree.  With GIT_DIFF_IGNORE_CASE and
+GIT_DIFF_INCLUDE_CASECHANGE it added two deltas for a tree, and only
+one of them was removed.
+
+Detect trees with S_ISDIR like the tree iterator does, so that trees
+with a mode like 040755 are expanded too.
+
+Expand only the tree that comes next.  With
+GIT_DIFF_INCLUDE_TYPECHANGE_TREES, also expand the trees that sort
+between a file `a` and `a/`, since typechange detection compares `a`
+with the next entry on the other side.
+
+Do not skip trees in case insensitive diffs: the case insensitive tree
+iterator merges trees whose names differ only in case, so one of them
+cannot be skipped on its own.  Return tree entries also when the diff
+options are NULL.
+
+Add tests for these cases.
+---
+ src/libgit2/diff_generate.c | 200 +++++++++++++++++------------
+ tests/libgit2/diff/tree.c   | 250 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 365 insertions(+), 85 deletions(-)
+
+diff --git a/src/libgit2/diff_generate.c b/src/libgit2/diff_generate.c
+index 9581dc70c78..b492ca15198 100644
+--- a/src/libgit2/diff_generate.c
++++ b/src/libgit2/diff_generate.c
+@@ -802,8 +802,7 @@ static int maybe_modified_submodule(
+ 
+ static int maybe_modified(
+ 	git_diff_generated *diff,
+-	diff_in_progress *info,
+-	bool skip_pathspec_match)
++	diff_in_progress *info)
+ {
+ 	git_oid noid;
+ 	git_delta_t status = GIT_DELTA_MODIFIED;
+@@ -813,15 +812,13 @@ static int maybe_modified(
+ 	unsigned int nmode = nitem->mode;
+ 	bool new_is_workdir = (info->new_iter->type == GIT_ITERATOR_WORKDIR);
+ 	bool modified_uncertain = false;
+-	const char *matched_pathspec = NULL;
++	const char *matched_pathspec;
+ 	int error = 0;
+ 
+ 	git_oid_clear(&noid, diff->base.opts.oid_type);
+ 
+-	if (!skip_pathspec_match) {
+-		if (!diff_pathspec_match(&matched_pathspec, diff, oitem))
+-			return 0;
+-	}
++	if (!diff_pathspec_match(&matched_pathspec, diff, oitem))
++		return 0;
+ 
+ 	/* on platforms with no symlinks, preserve mode of existing symlinks */
+ 	if (S_ISLNK(omode) && S_ISREG(nmode) && new_is_workdir &&
+@@ -1045,32 +1042,93 @@ static int iterator_advance_over(
+ 	return error;
+ }
+ 
+-static int iterator_expand_until_not_tree_entry(
+-	const git_index_entry **entry,
+-	const git_index_entry *current_entry, 
+-	git_iterator *iterator)
++GIT_INLINE(bool) iterator_is_tree(git_iterator *iterator)
+ {
+-	int error = 0;
++	return iterator->type == GIT_ITERATOR_TREE ||
++		iterator->type == GIT_ITERATOR_EMPTY;
++}
+ 
+-	while (current_entry && current_entry->mode == GIT_FILEMODE_TREE) {
+-		if ((error = iterator_advance_into(entry, iterator)) < 0) {
+-			return error;
+-		}
+-		current_entry = *entry;
+-	}
++GIT_INLINE(bool) iterator_returns_trees(git_iterator *iterator)
++{
++	return iterator->type == GIT_ITERATOR_TREE &&
++		(iterator->flags & GIT_ITERATOR_DONT_AUTOEXPAND) != 0;
++}
+ 
+-	return error;
++/*
++ * Whether the tree sorts between the item `a` and the path `a/`, or is
++ * `a/` itself (eg, `a.txt/` or `a-b/`).
++ */
++static bool tree_sorts_before_subdir(
++	git_diff_generated *diff,
++	const git_index_entry *tree_item,
++	const git_index_entry *item)
++{
++	size_t len = strlen(item->path);
++
++	return diff->base.pfxcomp(tree_item->path, item->path) == 0 &&
++		(unsigned char)tree_item->path[len] <= '/';
+ }
+ 
+-static int iterators_expand_until_not_tree_entry(diff_in_progress* info) 
++/*
++ * Tree iterators that do not autoexpand return tree entries.  Skip a pair
++ * of trees that have the same path and the same id, since their contents
++ * cannot produce deltas.  Expand any other tree before the diff looks at
++ * it, so that the rest of the diff only sees the entries that an
++ * autoexpanding iterator would return.
++ */
++static int handle_tree_items(
++	git_diff_generated *diff, diff_in_progress *info)
+ {
++	bool skip_unmodified =
++		DIFF_FLAG_ISNT_SET(diff, GIT_DIFF_INCLUDE_UNMODIFIED) &&
++		DIFF_FLAG_ISNT_SET(diff, GIT_DIFF_IGNORE_CASE);
++	bool typechange_trees =
++		DIFF_FLAG_IS_SET(diff, GIT_DIFF_INCLUDE_TYPECHANGE_TREES);
+ 	int error = 0;
+ 
+-	if ((error = iterator_expand_until_not_tree_entry(
+-	             &info->oitem, info->oitem, info->old_iter)) < 0 ||
+-	    (error = iterator_expand_until_not_tree_entry(
+-	             &info->nitem, info->nitem, info->new_iter)) < 0) {
+-		return error;
++	while (true) {
++		const git_index_entry *oitem = info->oitem, *nitem = info->nitem;
++		bool old_is_tree = oitem && S_ISDIR(oitem->mode);
++		bool new_is_tree = nitem && S_ISDIR(nitem->mode);
++		bool expand_old, expand_new;
++		int cmp;
++
++		if (!old_is_tree && !new_is_tree)
++			break;
++
++		cmp = oitem ?
++			(nitem ? diff->base.entrycomp(oitem, nitem) : -1) : 1;
++
++		if (skip_unmodified && old_is_tree && new_is_tree && cmp == 0 &&
++		    git_oid_equal(&oitem->id, &nitem->id)) {
++			if ((error = iterator_advance(&info->oitem, info->old_iter)) < 0 ||
++			    (error = iterator_advance(&info->nitem, info->new_iter)) < 0)
++				break;
++
++			continue;
++		}
++
++		/*
++		 * Expand the tree that comes next.  Tree typechange detection
++		 * compares an unmatched file `a` with the next entry on the
++		 * other side, which an autoexpanding iterator would take from
++		 * the trees between `a` and `a/`, so expand those trees too.
++		 */
++		expand_old = old_is_tree && (cmp <= 0 ||
++			(typechange_trees && tree_sorts_before_subdir(diff, oitem, nitem)));
++		expand_new = new_is_tree && (cmp >= 0 ||
++			(typechange_trees && tree_sorts_before_subdir(diff, nitem, oitem)));
++
++		if (!expand_old && !expand_new)
++			break;
++
++		if (expand_old &&
++		    (error = iterator_advance_into(&info->oitem, info->old_iter)) < 0)
++			break;
++
++		if (expand_new &&
++		    (error = iterator_advance_into(&info->nitem, info->new_iter)) < 0)
++			break;
+ 	}
+ 
+ 	return error;
+@@ -1276,7 +1334,7 @@ static int handle_matched_item(
+ {
+ 	int error = 0;
+ 
+-	if ((error = maybe_modified(diff, info, false)) < 0)
++	if ((error = maybe_modified(diff, info)) < 0)
+ 		return error;
+ 
+ 	if (!(error = iterator_advance(&info->oitem, info->old_iter)))
+@@ -1294,8 +1352,8 @@ int git_diff__from_iterators(
+ {
+ 	git_diff_generated *diff;
+ 	diff_in_progress info = {0};
++	bool returns_trees;
+ 	int error = 0;
+-	bool dont_expand_unmodified_trees = false;
+ 
+ 	*out = NULL;
+ 
+@@ -1317,60 +1375,26 @@ int git_diff__from_iterators(
+ 	if ((error = diff_generated_apply_options(diff, opts)) < 0)
+ 		goto cleanup;
+ 
+-	dont_expand_unmodified_trees = DIFF_FLAG_ISNT_SET(diff, GIT_DIFF_INCLUDE_UNMODIFIED) &&
+-	                               (git_iterator_type(old_iter) == GIT_ITERATOR_TREE ||
+-	                                git_iterator_type(old_iter) == GIT_ITERATOR_EMPTY) &&
+-	                               (git_iterator_type(new_iter) == GIT_ITERATOR_TREE ||
+-	                                git_iterator_type(new_iter) == GIT_ITERATOR_EMPTY);
+-
+ 	if ((error = iterator_current(&info.oitem, old_iter)) < 0 ||
+ 		(error = iterator_current(&info.nitem, new_iter)) < 0)
+ 		goto cleanup;
+ 
++	/* only a diff of two trees handles tree entries, since the handling
++	 * of unmatched index and workdir items looks at more of the other side
++	 */
++	returns_trees = iterator_is_tree(old_iter) && iterator_is_tree(new_iter) &&
++		(iterator_returns_trees(old_iter) || iterator_returns_trees(new_iter));
++
+ 	/* run iterators building diffs */
+ 	while (!error && (info.oitem || info.nitem)) {
+-		const int cmp = info.oitem ?
+-		    (info.nitem ? diff->base.entrycomp(info.oitem, info.nitem) : -1) : 1;
+-
+-		/**
+-		 * if entries are equal and they are trees, then check for modified state can be
+-		 * done. The check is done by 'maybe_modified'. Modified or unequal entries will be
+-		 * expanded to leaf entries (blobs, links, etc.) and processed as usual.
+-		 */
+-		if (dont_expand_unmodified_trees &&
+-		    ((info.oitem && info.oitem->mode == GIT_FILEMODE_TREE) ||
+-		     (info.nitem && info.nitem->mode == GIT_FILEMODE_TREE))) {
+-			if (cmp == 0 && 
+-				info.oitem && info.oitem->mode == GIT_FILEMODE_TREE && 
+-				info.nitem && info.nitem->mode == GIT_FILEMODE_TREE) 
+-			{
+-				const size_t prev_deltas_num = git_diff_num_deltas(&diff->base);
+-				if ((error = maybe_modified(diff, &info, true)) < 0)
+-					goto cleanup;
+-
+-				/* if there are no new deltas in diff then skip to next tree entry
+-				 */
+-				if (prev_deltas_num == git_diff_num_deltas(&diff->base)) {
+-					if ((error = iterator_advance(&info.oitem, info.old_iter)) < 0 ||
+-					    (error = iterator_advance(&info.nitem, info.new_iter)) < 0)
+-						goto cleanup;
+-					continue;
+-				} else {
+-					/* if trees are different, then pop the last delta and
+-					 * expand iterators until a non-tree entry is found */
+-					git_diff_delta *last = git_vector_last(&diff->base.deltas);
+-					git_vector_pop(&diff->base.deltas);
+-					git__free(last);
+-				}
+-			}
++		int cmp;
+ 
+-			/* if entries are not equal or modified, then expand the iterators until a
+-			 * non-tree entry is found */
+-			if ((error = iterators_expand_until_not_tree_entry(&info)) < 0) {
+-				goto cleanup;
+-			}
++		if (returns_trees) {
++			if ((error = handle_tree_items(diff, &info)) < 0)
++				break;
+ 
+-			continue;
++			if (!info.oitem && !info.nitem)
++				break;
+ 		}
+ 
+ 		/* report progress */
+@@ -1382,6 +1406,9 @@ int git_diff__from_iterators(
+ 				break;
+ 		}
+ 
++		cmp = info.oitem ?
++			(info.nitem ? diff->base.entrycomp(info.oitem, info.nitem) : -1) : 1;
++
+ 		/* create DELETED records for old items not matched in new */
+ 		if (cmp < 0)
+ 			error = handle_unmatched_old_item(diff, &info);
+@@ -1451,6 +1478,7 @@ int git_diff_tree_to_tree(
+ 		b_opts = GIT_ITERATOR_OPTIONS_INIT;
+ 	git_iterator *a = NULL, *b = NULL;
+ 	git_diff *diff = NULL;
++	uint32_t flags = opts ? opts->flags : 0;
+ 	char *prefix = NULL;
+ 	int error = 0;
+ 
+@@ -1459,18 +1487,20 @@ int git_diff_tree_to_tree(
+ 
+ 	*out = NULL;
+ 
+-	if (opts) {
+-		/* for tree to tree diff, be case sensitive even if the index is
+-		 * currently case insensitive, unless the user explicitly asked
+-		 * for case insensitivity
+-		 */
+-		if ((opts->flags & GIT_DIFF_IGNORE_CASE) != 0) {
+-			iflag = GIT_ITERATOR_IGNORE_CASE;
+-		}
+-		if ((opts->flags & GIT_DIFF_INCLUDE_UNMODIFIED) == 0) {
+-			iflag |= GIT_ITERATOR_DONT_AUTOEXPAND;
+-		}
+-	}
++	/* for tree to tree diff, be case sensitive even if the index is
++	 * currently case insensitive, unless the user explicitly asked
++	 * for case insensitivity
++	 */
++	if ((flags & GIT_DIFF_IGNORE_CASE) != 0)
++		iflag = GIT_ITERATOR_IGNORE_CASE;
++
++	/* return tree entries, so that the diff can skip unmodified trees,
++	 * unless unmodified files are requested.  a case insensitive tree
++	 * iterator merges trees whose names differ only in case, so one of
++	 * them cannot be skipped on its own.
++	 */
++	if ((flags & (GIT_DIFF_IGNORE_CASE | GIT_DIFF_INCLUDE_UNMODIFIED)) == 0)
++		iflag |= GIT_ITERATOR_DONT_AUTOEXPAND;
+ 
+ 	if ((error = diff_prepare_iterator_opts(&prefix, &a_opts, iflag, &b_opts, iflag, opts)) < 0 ||
+ 	    (error = git_iterator_for_tree(&a, old_tree, &a_opts)) < 0 ||
+diff --git a/tests/libgit2/diff/tree.c b/tests/libgit2/diff/tree.c
+index e03ee7b228f..5baaaefbe81 100644
+--- a/tests/libgit2/diff/tree.c
++++ b/tests/libgit2/diff/tree.c
+@@ -573,3 +573,253 @@ void test_diff_tree__diff_tree_with_empty_dir_entry_succeeds(void)
+ 	git_treebuilder_free(builder);
+ 	git_buf_dispose(&patch);
+ }
++
++static git_tree *create_tree(const char **paths_and_contents)
++{
++	git_tree_update updates[8];
++	git_tree *tree;
++	git_oid id;
++	size_t i;
++
++	for (i = 0; paths_and_contents[i * 2]; i++) {
++		const char *content = paths_and_contents[i * 2 + 1];
++
++		cl_assert(i < ARRAY_SIZE(updates));
++
++		memset(&updates[i], 0, sizeof(git_tree_update));
++		updates[i].action = GIT_TREE_UPDATE_UPSERT;
++		updates[i].filemode = GIT_FILEMODE_BLOB;
++		updates[i].path = paths_and_contents[i * 2];
++		cl_git_pass(git_blob_create_from_buffer(&updates[i].id,
++			g_repo, content, strlen(content)));
++	}
++
++	cl_git_pass(git_tree_create_updated(&id, g_repo, NULL, i, updates));
++	cl_git_pass(git_tree_lookup(&tree, g_repo, &id));
++
++	return tree;
++}
++
++/* entries must be added in git order */
++static void add_raw_tree_entry(
++	git_str *raw, const char *mode, const char *name, const git_oid *id)
++{
++	git_str_printf(raw, "%s %s", mode, name);
++	git_str_putc(raw, '\0');
++	git_str_put(raw, (const char *)id->id, GIT_OID_SHA1_SIZE);
++	cl_assert(!git_str_oom(raw));
++}
++
++static git_tree *write_raw_tree(git_str *raw)
++{
++	git_odb *odb;
++	git_tree *tree;
++	git_oid id;
++
++	cl_git_pass(git_repository_odb(&odb, g_repo));
++	cl_git_pass(git_odb_write(&id, odb, raw->ptr, raw->size, GIT_OBJECT_TREE));
++	cl_git_pass(git_tree_lookup(&tree, g_repo, &id));
++
++	git_odb_free(odb);
++	git_str_clear(raw);
++
++	return tree;
++}
++
++void test_diff_tree__does_not_load_unmodified_subtrees(void)
++{
++	git_str raw = GIT_STR_INIT;
++	git_oid missing, one, two;
++
++	g_repo = cl_git_sandbox_init("empty_standard_repo");
++
++	cl_git_pass(git_blob_create_from_buffer(&one, g_repo, "one\n", 4));
++	cl_git_pass(git_blob_create_from_buffer(&two, g_repo, "two\n", 4));
++
++	/* both trees point to the same subtree, which is not in the odb */
++	git_oid_cpy(&missing, &one);
++	missing.id[0] ^= 0xff;
++
++	add_raw_tree_entry(&raw, "100644", "file", &one);
++	add_raw_tree_entry(&raw, "40000", "missing", &missing);
++	a = write_raw_tree(&raw);
++
++	add_raw_tree_entry(&raw, "100644", "file", &two);
++	add_raw_tree_entry(&raw, "40000", "missing", &missing);
++	b = write_raw_tree(&raw);
++
++	cl_git_pass(git_diff_tree_to_tree(&diff, g_repo, a, b, NULL));
++
++	cl_assert_equal_i(1, git_diff_num_deltas(diff));
++	cl_assert_equal_i(GIT_DELTA_MODIFIED, git_diff_get_delta(diff, 0)->status);
++	cl_assert_equal_s("file", git_diff_get_delta(diff, 0)->new_file.path);
++
++	git_diff_free(diff);
++	diff = NULL;
++
++	/* unmodified entries can only be listed by reading the subtree */
++	opts.flags = GIT_DIFF_INCLUDE_UNMODIFIED;
++	cl_git_fail(git_diff_tree_to_tree(&diff, g_repo, a, b, &opts));
++
++	git_str_dispose(&raw);
++}
++
++static int notify_only_files_cb(
++	const git_diff *diff_so_far,
++	const git_diff_delta *delta,
++	const char *matched_pathspec,
++	void *payload)
++{
++	size_t *calls = payload;
++
++	GIT_UNUSED(diff_so_far);
++	GIT_UNUSED(matched_pathspec);
++
++	cl_assert(!S_ISDIR(delta->old_file.mode));
++	cl_assert(!S_ISDIR(delta->new_file.mode));
++
++	(*calls)++;
++	return 0;
++}
++
++void test_diff_tree__notify_cb_is_not_called_for_trees(void)
++{
++	const char *old_paths[] = {
++		"dir/a", "one\n", "dir/b", "two\n", "same/c", "three\n", NULL
++	};
++	const char *new_paths[] = {
++		"dir/a", "uno\n", "dir/b", "dos\n", "same/c", "three\n", NULL
++	};
++	size_t calls = 0;
++
++	g_repo = cl_git_sandbox_init("empty_standard_repo");
++
++	a = create_tree(old_paths);
++	b = create_tree(new_paths);
++
++	opts.notify_cb = notify_only_files_cb;
++	opts.payload = &calls;
++
++	cl_git_pass(git_diff_tree_to_tree(&diff, g_repo, a, b, &opts));
++
++	cl_assert_equal_i(2, calls);
++	cl_assert_equal_i(2, git_diff_num_deltas(diff));
++	cl_assert_equal_s("dir/a", git_diff_get_delta(diff, 0)->new_file.path);
++	cl_assert_equal_s("dir/b", git_diff_get_delta(diff, 1)->new_file.path);
++}
++
++void test_diff_tree__ignore_case_with_trees_that_differ_in_case(void)
++{
++	const char *old_paths[] = {
++		"FOO/a", "same\n", "foo/b", "old\n", NULL
++	};
++	const char *new_paths[] = {
++		"FOO/a", "same\n", "foo/b", "new\n", NULL
++	};
++
++	g_repo = cl_git_sandbox_init("empty_standard_repo");
++
++	a = create_tree(old_paths);
++	b = create_tree(new_paths);
++
++	opts.flags = GIT_DIFF_IGNORE_CASE;
++	cl_git_pass(git_diff_tree_to_tree(&diff, g_repo, a, b, &opts));
++
++	cl_assert_equal_i(1, git_diff_num_deltas(diff));
++	cl_assert_equal_i(GIT_DELTA_MODIFIED, git_diff_get_delta(diff, 0)->status);
++	cl_assert_equal_s("foo/b", git_diff_get_delta(diff, 0)->new_file.path);
++}
++
++void test_diff_tree__ignore_case_with_casechange_of_tree(void)
++{
++	const char *old_paths[] = { "Dir/a", "content\n", NULL };
++	const char *new_paths[] = { "dir/a", "content\n", NULL };
++	const git_diff_delta *delta;
++	size_t i;
++
++	g_repo = cl_git_sandbox_init("empty_standard_repo");
++
++	a = create_tree(old_paths);
++	b = create_tree(new_paths);
++
++	opts.flags = GIT_DIFF_IGNORE_CASE | GIT_DIFF_INCLUDE_CASECHANGE;
++	cl_git_pass(git_diff_tree_to_tree(&diff, g_repo, a, b, &opts));
++
++	cl_assert_equal_i(2, git_diff_num_deltas(diff));
++
++	for (i = 0; i < git_diff_num_deltas(diff); i++) {
++		delta = git_diff_get_delta(diff, i);
++
++		if (delta->status == GIT_DELTA_DELETED)
++			cl_assert_equal_s("Dir/a", delta->old_file.path);
++		else if (delta->status == GIT_DELTA_ADDED)
++			cl_assert_equal_s("dir/a", delta->new_file.path);
++		else
++			cl_fail("unexpected delta status");
++	}
++}
++
++void test_diff_tree__tree_with_nonstandard_mode(void)
++{
++	const char *old_paths[] = { "file", "one\n", NULL };
++	const char *new_paths[] = { "file", "two\n", NULL };
++	git_str raw = GIT_STR_INIT;
++	git_tree *old_dir, *new_dir;
++
++	g_repo = cl_git_sandbox_init("empty_standard_repo");
++
++	old_dir = create_tree(old_paths);
++	new_dir = create_tree(new_paths);
++
++	add_raw_tree_entry(&raw, "40755", "dir", git_tree_id(old_dir));
++	a = write_raw_tree(&raw);
++
++	add_raw_tree_entry(&raw, "40755", "dir", git_tree_id(new_dir));
++	b = write_raw_tree(&raw);
++
++	cl_git_pass(git_diff_tree_to_tree(&diff, g_repo, a, b, &opts));
++
++	cl_assert_equal_i(1, git_diff_num_deltas(diff));
++	cl_assert_equal_i(GIT_DELTA_MODIFIED, git_diff_get_delta(diff, 0)->status);
++	cl_assert_equal_s("dir/file", git_diff_get_delta(diff, 0)->new_file.path);
++
++	git_tree_free(old_dir);
++	git_tree_free(new_dir);
++	git_str_dispose(&raw);
++}
++
++void test_diff_tree__typechange_trees_with_empty_tree_in_between(void)
++{
++	const char *subdir_paths[] = { "bar", "bar\n", NULL };
++	git_str raw = GIT_STR_INIT;
++	git_tree *empty, *subdir;
++	git_oid blob;
++
++	g_repo = cl_git_sandbox_init("empty_standard_repo");
++
++	empty = write_raw_tree(&raw);
++	subdir = create_tree(subdir_paths);
++	cl_git_pass(git_blob_create_from_buffer(&blob, g_repo, "foo\n", 4));
++
++	/* `foo.txt/` sorts between `foo` and `foo/` */
++	add_raw_tree_entry(&raw, "100644", "foo", &blob);
++	add_raw_tree_entry(&raw, "40000", "foo.txt", git_tree_id(empty));
++	a = write_raw_tree(&raw);
++
++	add_raw_tree_entry(&raw, "40000", "foo.txt", git_tree_id(empty));
++	add_raw_tree_entry(&raw, "40000", "foo", git_tree_id(subdir));
++	b = write_raw_tree(&raw);
++
++	opts.flags = GIT_DIFF_INCLUDE_TYPECHANGE_TREES;
++	cl_git_pass(git_diff_tree_to_tree(&diff, g_repo, a, b, &opts));
++
++	cl_assert_equal_i(2, git_diff_num_deltas(diff));
++	cl_assert_equal_i(GIT_DELTA_TYPECHANGE, git_diff_get_delta(diff, 0)->status);
++	cl_assert_equal_s("foo", git_diff_get_delta(diff, 0)->old_file.path);
++	cl_assert_equal_i(GIT_DELTA_ADDED, git_diff_get_delta(diff, 1)->status);
++	cl_assert_equal_s("foo/bar", git_diff_get_delta(diff, 1)->new_file.path);
++
++	git_tree_free(empty);
++	git_tree_free(subdir);
++	git_str_dispose(&raw);
++}

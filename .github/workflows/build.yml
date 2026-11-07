@@ -149,23 +149,23 @@ jobs:
         with:
           arch: ${{ matrix.env.msvc_arch }}
 
-      # libgit2 needs a real system package everywhere (see meson.build for
-      # why); everything else has a wrap fallback and builds from source if
-      # missing, so CI doesn't install it. appstream provides appstreamcli,
-      # required on Linux for AppStream metadata generation.
+      # Dependencies with a wrap fallback build from source if missing, so CI
+      # doesn't install them. libssh2 is the exception: libgit2's CMake build
+      # looks for it itself and can't see Meson's libssh2 wrap. appstream
+      # provides appstreamcli, required on Linux for AppStream metadata generation.
       - name: Install dependencies (Linux)
         if: matrix.env.name == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config xvfb libgit2-dev appstream
+          sudo apt-get install -y pkg-config xvfb libssh2-1-dev appstream
 
       - name: Install dependencies (macOS)
         if: matrix.env.name == 'macos'
-        run: brew install pkg-config libgit2
+        run: brew install pkg-config libssh2
 
       # vcpkg's default local binary cache (see vcpkg docs on binary caching)
-      # otherwise starts empty on every run, forcing OpenSSL/libssh2/libgit2
-      # to rebuild from source each time.
+      # otherwise starts empty on every run, forcing OpenSSL/libssh2 to
+      # rebuild from source each time.
       - name: Cache vcpkg archives
         if: matrix.env.name == 'win64'
         uses: actions/cache@v4
@@ -179,7 +179,7 @@ jobs:
         if: matrix.env.name == 'win64'
         shell: pwsh
         run: |
-          vcpkg install libgit2[ssh] --triplet x64-windows
+          vcpkg install libssh2 --triplet x64-windows
           choco install nsis -y
           # choco's own PATH update (via the registry) doesn't reach later
           # steps in this job, so add makensis's dir explicitly.

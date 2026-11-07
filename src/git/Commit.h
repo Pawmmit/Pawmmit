@@ -69,6 +69,7 @@ public:
   /// @param commit Commit to compare with
   /// @return Number of commits given as first=ahead, second=behind
   std::pair<size_t, size_t> difference(const Commit &commit) const;
+  std::pair<size_t, size_t> difference(const Id &other) const;
 
   // True if this commit is the given commit or reachable from it.
   bool isAncestorOf(const Commit &commit) const;

@@ -1,0 +1,605 @@
+From fa743b53a25631876b854b1c10038571a8f58379 Mon Sep 17 00:00:00 2001
+From: Alf Henrik Sauge <alf.henrik.sauge@gmail.com>
+Date: Thu, 5 Nov 2026 23:46:24 +0100
+Subject: [PATCH 1/2] diff: extract inexact rename matching into a separate
+ function
+
+This removes a backwards goto, and prepares the code to be more readable once
+ exact matching is added
+---
+ src/libgit2/diff_tform.c | 173 ++++++++++++++++++++++-----------------
+ 1 file changed, 96 insertions(+), 77 deletions(-)
+
+diff --git a/src/libgit2/diff_tform.c b/src/libgit2/diff_tform.c
+index 33ed2d11c..aa9953cd5 100644
+--- a/src/libgit2/diff_tform.c
++++ b/src/libgit2/diff_tform.c
+@@ -816,18 +816,107 @@ typedef struct {
+ 	uint16_t similarity;
+ } diff_find_match;
+ 
+-int git_diff_find_similar(
++/*
++ * Find best-fit matches for rename / copy candidates
++ */
++static int find_inexact_matches(
+ 	git_diff *diff,
+-	const git_diff_find_options *given_opts)
++	const git_diff_find_options *opts,
++	void **sigcache,
++	diff_find_match *src2tgt,
++	diff_find_match *tgt2src,
++	diff_find_match *tgt2src_copy,
++	const size_t num_srcs,
++	const size_t num_tgts)
+ {
+ 	size_t s, t;
+ 	int error = 0, result;
+ 	uint16_t similarity;
+ 	git_diff_delta *src, *tgt;
++	size_t tried_srcs, tried_tgts;
++	size_t num_bumped;
++
++	do {
++		tried_tgts = num_bumped = 0;
++
++		git_vector_foreach(&diff->deltas, t, tgt) {
++			/* skip things that are not rename targets */
++			if ((tgt->flags & GIT_DIFF_FLAG__IS_RENAME_TARGET) == 0)
++				continue;
++
++			tried_srcs = 0;
++
++			git_vector_foreach(&diff->deltas, s, src) {
++				/* skip things that are not rename sources */
++				if ((src->flags & GIT_DIFF_FLAG__IS_RENAME_SOURCE) == 0)
++					continue;
++
++				/* calculate similarity for this pair and find best match */
++				if (s == t)
++					result = -1; /* don't measure self-similarity here */
++				else if ((error = similarity_measure(
++					&result, diff, opts, sigcache, 2 * s, 2 * t + 1)) < 0)
++					return error;
++
++				if (result < 0)
++					continue;
++				similarity = (uint16_t)result;
++
++				/* is this a better rename? */
++				if (tgt2src[t].similarity < similarity &&
++					src2tgt[s].similarity < similarity)
++				{
++					/* eject old mapping */
++					if (src2tgt[s].similarity > 0) {
++						tgt2src[src2tgt[s].idx].similarity = 0;
++						num_bumped++;
++					}
++					if (tgt2src[t].similarity > 0) {
++						src2tgt[tgt2src[t].idx].similarity = 0;
++						num_bumped++;
++					}
++
++					/* write new mapping */
++					tgt2src[t].idx = s;
++					tgt2src[t].similarity = similarity;
++					src2tgt[s].idx = t;
++					src2tgt[s].similarity = similarity;
++				}
++
++				/* keep best absolute match for copies */
++				if (tgt2src_copy != NULL &&
++					tgt2src_copy[t].similarity < similarity)
++				{
++					tgt2src_copy[t].idx = s;
++					tgt2src_copy[t].similarity = similarity;
++				}
++
++				if (++tried_srcs >= num_srcs)
++					break;
++
++				/* cap on maximum targets we'll examine (per "tgt" file) */
++				if (tried_srcs > opts->rename_limit)
++					break;
++			}
++
++			if (++tried_tgts >= num_tgts)
++				break;
++		}
++	} while (num_bumped > 0); /* try again if we bumped some items */
++
++	return 0;
++}
++
++int git_diff_find_similar(
++	git_diff *diff,
++	const git_diff_find_options *given_opts)
++{
++	size_t s, t;
++	int error = 0;
++	git_diff_delta *src, *tgt;
+ 	git_diff_find_options opts = GIT_DIFF_FIND_OPTIONS_INIT;
+ 	size_t num_deltas, num_srcs = 0, num_tgts = 0;
+-	size_t tried_srcs = 0, tried_tgts = 0;
+-	size_t num_rewrites = 0, num_updates = 0, num_bumped = 0,
++	size_t num_rewrites = 0, num_updates = 0,
+ 	       num_to_delete = 0;
+ 	size_t sigcache_size;
+ 	void **sigcache = NULL; /* cache of similarity metric file signatures */
+@@ -891,79 +980,9 @@ int git_diff_find_similar(
+ 		GIT_ERROR_CHECK_ALLOC(tgt2src_copy);
+ 	}
+ 
+-	/*
+-	 * Find best-fit matches for rename / copy candidates
+-	 */
+-
+-find_best_matches:
+-	tried_tgts = num_bumped = 0;
+-
+-	git_vector_foreach(&diff->deltas, t, tgt) {
+-		/* skip things that are not rename targets */
+-		if ((tgt->flags & GIT_DIFF_FLAG__IS_RENAME_TARGET) == 0)
+-			continue;
+-
+-		tried_srcs = 0;
+-
+-		git_vector_foreach(&diff->deltas, s, src) {
+-			/* skip things that are not rename sources */
+-			if ((src->flags & GIT_DIFF_FLAG__IS_RENAME_SOURCE) == 0)
+-				continue;
+-
+-			/* calculate similarity for this pair and find best match */
+-			if (s == t)
+-				result = -1; /* don't measure self-similarity here */
+-			else if ((error = similarity_measure(
+-				&result, diff, &opts, sigcache, 2 * s, 2 * t + 1)) < 0)
+-				goto cleanup;
+-
+-			if (result < 0)
+-				continue;
+-			similarity = (uint16_t)result;
+-
+-			/* is this a better rename? */
+-			if (tgt2src[t].similarity < similarity &&
+-				src2tgt[s].similarity < similarity)
+-			{
+-				/* eject old mapping */
+-				if (src2tgt[s].similarity > 0) {
+-					tgt2src[src2tgt[s].idx].similarity = 0;
+-					num_bumped++;
+-				}
+-				if (tgt2src[t].similarity > 0) {
+-					src2tgt[tgt2src[t].idx].similarity = 0;
+-					num_bumped++;
+-				}
+-
+-				/* write new mapping */
+-				tgt2src[t].idx = s;
+-				tgt2src[t].similarity = similarity;
+-				src2tgt[s].idx = t;
+-				src2tgt[s].similarity = similarity;
+-			}
+-
+-			/* keep best absolute match for copies */
+-			if (tgt2src_copy != NULL &&
+-				tgt2src_copy[t].similarity < similarity)
+-			{
+-				tgt2src_copy[t].idx = s;
+-				tgt2src_copy[t].similarity = similarity;
+-			}
+-
+-			if (++tried_srcs >= num_srcs)
+-				break;
+-
+-			/* cap on maximum targets we'll examine (per "tgt" file) */
+-			if (tried_srcs > opts.rename_limit)
+-				break;
+-		}
+-
+-		if (++tried_tgts >= num_tgts)
+-			break;
+-	}
+-
+-	if (num_bumped > 0) /* try again if we bumped some items */
+-		goto find_best_matches;
++	if ((error = find_inexact_matches(diff, &opts, sigcache, src2tgt, tgt2src,
++		tgt2src_copy, num_srcs, num_tgts)) < 0)
++		goto cleanup;
+ 
+ 	/*
+ 	 * Rewrite the diffs with renames / copies
+-- 
+2.56.0
+
+
+From 3173b7e52ee2b4cb92c88f455556288df1e6b33e Mon Sep 17 00:00:00 2001
+From: Alf Henrik Sauge <alf.henrik.sauge@gmail.com>
+Date: Fri, 6 Nov 2026 21:31:33 +0100
+Subject: [PATCH 2/2] diff: speed up rename detection by doing cheaper exact
+ matching first
+
+This also fixes an issue with large number of renames in a single diff not
+being correctly detected as renames due to hitting opts->rename_limit.
+Since OID matching can be done far faster, there is no need to limit comparing
+in the exact matching loop.
+
+Since there now is an exact match loop, GIT_DIFF_FIND_EXACT_MATCH_ONLY
+now bypasses the inexact matching.
+---
+ src/libgit2/diff_tform.c    | 149 +++++++++++++++++++++++++++++----
+ tests/libgit2/diff/rename.c | 160 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 294 insertions(+), 15 deletions(-)
+
+diff --git a/src/libgit2/diff_tform.c b/src/libgit2/diff_tform.c
+index aa9953cd5..fe2455b20 100644
+--- a/src/libgit2/diff_tform.c
++++ b/src/libgit2/diff_tform.c
+@@ -16,6 +16,7 @@
+ #include "fs_path.h"
+ #include "futils.h"
+ #include "config.h"
++#include "hashmap_oid.h"
+ 
+ git_diff_delta *git_diff__delta_dup(
+ 	const git_diff_delta *d, git_pool *pool)
+@@ -535,6 +536,19 @@ static void similarity_unload(similarity_info *info)
+ 		git_str_dispose(&info->data);
+ }
+ 
++/* Ensure workdir items have an OID */
++static void workdir_find_oid(git_diff *diff, size_t idx)
++{
++	git_diff_file *file = similarity_get_file(diff, idx);
++	git_iterator_t src = (idx & 1) ? diff->new_src : diff->old_src;
++
++	if (git_oid_is_zero(&file->id) &&
++		src == GIT_ITERATOR_WORKDIR &&
++		!git_diff__oid_for_file(&file->id,
++			diff, file->path, file->mode, file->size))
++		file->flags |= GIT_DIFF_FLAG_VALID_ID;
++}
++
+ #define FLAG_SET(opts,flag_name) (((opts)->flags & flag_name) != 0)
+ 
+ /* - score < 0 means files cannot be compared
+@@ -563,17 +577,8 @@ static int similarity_measure(
+ 
+ 	/* if exact match is requested, force calculation of missing OIDs now */
+ 	if (exact_match) {
+-		if (git_oid_is_zero(&a_file->id) &&
+-			diff->old_src == GIT_ITERATOR_WORKDIR &&
+-			!git_diff__oid_for_file(&a_file->id,
+-				diff, a_file->path, a_file->mode, a_file->size))
+-			a_file->flags |= GIT_DIFF_FLAG_VALID_ID;
+-
+-		if (git_oid_is_zero(&b_file->id) &&
+-			diff->new_src == GIT_ITERATOR_WORKDIR &&
+-			!git_diff__oid_for_file(&b_file->id,
+-				diff, b_file->path, b_file->mode, b_file->size))
+-			b_file->flags |= GIT_DIFF_FLAG_VALID_ID;
++		workdir_find_oid(diff, a_idx);
++		workdir_find_oid(diff, b_idx);
+ 	}
+ 
+ 	/* check OID match as a quick test */
+@@ -816,6 +821,113 @@ typedef struct {
+ 	uint16_t similarity;
+ } diff_find_match;
+ 
++#define NO_SOURCE SIZE_MAX
++GIT_HASHMAP_OID_SETUP(git_diff_oidmap, size_t);
++
++static int find_oids(
++	git_diff_oidmap *oid_to_src,
++	size_t *same_src,
++	git_diff *diff,
++	bool hash_workdir)
++{
++	git_diff_delta *src;
++	size_t s = diff->deltas.length, head_src;
++
++	/* Walk backwards to form chains of same source with each chain starting
++	 * with the first source in the diff
++	 */
++	while (s-- > 0) {
++		src = GIT_VECTOR_GET(&diff->deltas, s);
++		same_src[s] = NO_SOURCE;
++
++		if ((src->flags & GIT_DIFF_FLAG__IS_RENAME_SOURCE) != 0) {
++			if (hash_workdir)
++				workdir_find_oid(diff, 2 * s);
++
++			if (!git_oid_is_zero(&src->old_file.id)) {
++				if (!git_diff_oidmap_get(&head_src,
++						oid_to_src, &src->old_file.id))
++					same_src[s] = head_src;
++
++				if (git_diff_oidmap_put(oid_to_src,
++						&src->old_file.id, s) < 0)
++					return -1;
++			}
++		}
++	}
++
++	return 0;
++}
++
++static void match_exact_target(
++	size_t t,
++	size_t s,
++	size_t *same_src,
++	diff_find_match *src2tgt,
++	diff_find_match *tgt2src,
++	diff_find_match *tgt2src_copy)
++{
++	for (; s != NO_SOURCE; s = same_src[s]) {
++		if (s != t) {
++			if (tgt2src_copy != NULL && tgt2src_copy[t].similarity < 100) {
++				tgt2src_copy[t].idx = s;
++				tgt2src_copy[t].similarity = 100;
++			}
++
++			if (src2tgt[s].similarity < 100) {
++				tgt2src[t].idx = s;
++				tgt2src[t].similarity = 100;
++				src2tgt[s].idx = t;
++				src2tgt[s].similarity = 100;
++				return;
++			}
++		}
++	}
++}
++
++/*
++ * Find exact matches cheaply through OID comparison
++ */
++static int find_exact_matches(
++	git_diff *diff,
++	const git_diff_find_options *opts,
++	diff_find_match *src2tgt,
++	diff_find_match *tgt2src,
++	diff_find_match *tgt2src_copy)
++{
++	/* Only hash workdir files up front when matching exactly since
++	 * the inexact pass would otherwise read them anyway.
++	 * TODO: There might be better solutions to handle this
++	 */
++	bool hash_workdir = FLAG_SET(opts, GIT_DIFF_FIND_EXACT_MATCH_ONLY);
++	git_diff_oidmap oid_to_src = GIT_HASHMAP_INIT;
++	git_diff_delta *tgt;
++	size_t *same_src, s, t;
++	int error = 0;
++
++	same_src = git__mallocarray(diff->deltas.length, sizeof(size_t));
++	GIT_ERROR_CHECK_ALLOC(same_src);
++
++	if ((error = find_oids(&oid_to_src, same_src,
++		diff, hash_workdir)) == 0) {
++		git_vector_foreach(&diff->deltas, t, tgt) {
++			if ((tgt->flags & GIT_DIFF_FLAG__IS_RENAME_TARGET) != 0) {
++				if (hash_workdir)
++					workdir_find_oid(diff, (2 * t) + 1);
++
++				if (!git_diff_oidmap_get(&s,
++						&oid_to_src, &tgt->new_file.id))
++					match_exact_target(t, s, same_src,
++						src2tgt, tgt2src, tgt2src_copy);
++			}
++		}
++	}
++
++	git_diff_oidmap_dispose(&oid_to_src);
++	git__free(same_src);
++	return error;
++}
++
+ /*
+  * Find best-fit matches for rename / copy candidates
+  */
+@@ -841,14 +953,16 @@ static int find_inexact_matches(
+ 
+ 		git_vector_foreach(&diff->deltas, t, tgt) {
+ 			/* skip things that are not rename targets */
+-			if ((tgt->flags & GIT_DIFF_FLAG__IS_RENAME_TARGET) == 0)
++			if ((tgt->flags & GIT_DIFF_FLAG__IS_RENAME_TARGET) == 0 ||
++				tgt2src[t].similarity >= 100)
+ 				continue;
+ 
+ 			tried_srcs = 0;
+ 
+ 			git_vector_foreach(&diff->deltas, s, src) {
+ 				/* skip things that are not rename sources */
+-				if ((src->flags & GIT_DIFF_FLAG__IS_RENAME_SOURCE) == 0)
++				if ((src->flags & GIT_DIFF_FLAG__IS_RENAME_SOURCE) == 0 ||
++					(tgt2src_copy == NULL && src2tgt[s].similarity >= 100))
+ 					continue;
+ 
+ 				/* calculate similarity for this pair and find best match */
+@@ -980,8 +1094,13 @@ int git_diff_find_similar(
+ 		GIT_ERROR_CHECK_ALLOC(tgt2src_copy);
+ 	}
+ 
+-	if ((error = find_inexact_matches(diff, &opts, sigcache, src2tgt, tgt2src,
+-		tgt2src_copy, num_srcs, num_tgts)) < 0)
++	if ((error = find_exact_matches(diff, &opts,
++		src2tgt, tgt2src, tgt2src_copy)) < 0)
++		goto cleanup;
++
++	if (!FLAG_SET(&opts, GIT_DIFF_FIND_EXACT_MATCH_ONLY) &&
++		(error = find_inexact_matches(diff, &opts, sigcache, src2tgt,
++			tgt2src, tgt2src_copy, num_srcs, num_tgts)) < 0)
+ 		goto cleanup;
+ 
+ 	/*
+diff --git a/tests/libgit2/diff/rename.c b/tests/libgit2/diff/rename.c
+index a5bbfe447..5e525a6c9 100644
+--- a/tests/libgit2/diff/rename.c
++++ b/tests/libgit2/diff/rename.c
+@@ -2078,3 +2078,163 @@ void test_diff_rename__break_rewrite(void)
+ 	git_tree_free(old_tree);
+ 	git_tree_free(new_tree);
+ }
++
++#define CONTENT_A "foobar\nfoo\nbar\nboom\nbaz\n"
++#define CONTENT_B "one\ntwo\nthree\nfour\nfive\n"
++#define CONTENT_C "this\nis\na\nsentence\n"
++
++typedef struct {
++	const char *path;
++	const char *content;
++} tree_file;
++
++static git_tree *build_tree(const tree_file *files, size_t files_size)
++{
++	git_treebuilder *builder;
++	git_tree *tree;
++	git_oid blob_id, tree_id;
++	size_t i;
++
++	cl_git_pass(git_treebuilder_new(&builder, g_repo, NULL));
++
++	for (i = 0; i < files_size; i++) {
++		cl_git_pass(git_blob_create_from_buffer(&blob_id, g_repo,
++			files[i].content, strlen(files[i].content)));
++		cl_git_pass(git_treebuilder_insert(NULL, builder,
++			files[i].path, &blob_id, GIT_FILEMODE_BLOB));
++	}
++
++	cl_git_pass(git_treebuilder_write(&tree_id, builder));
++	cl_git_pass(git_tree_lookup(&tree, g_repo, &tree_id));
++
++	git_treebuilder_free(builder);
++	return tree;
++}
++
++static git_diff *diff_trees_find_similar(
++	const tree_file *old_files,
++	size_t old_files_size,
++	const tree_file *new_files,
++	size_t new_files_size,
++	const git_diff_options *diff_opts,
++	const git_diff_find_options *find_opts)
++{
++	git_tree *old_tree = build_tree(old_files, old_files_size);
++	git_tree *new_tree = build_tree(new_files, new_files_size);
++	git_diff *diff;
++
++	cl_git_pass(git_diff_tree_to_tree(&diff,
++		g_repo, old_tree, new_tree, diff_opts));
++	cl_git_pass(git_diff_find_similar(diff, find_opts));
++
++	git_tree_free(old_tree);
++	git_tree_free(new_tree);
++	return diff;
++}
++
++static void assert_delta(
++	git_diff *diff,
++	const char *new_path,
++	git_delta_t status,
++	const char *old_path,
++	uint16_t similarity)
++{
++	const git_diff_delta *delta;
++	size_t i;
++
++	for (i = 0; i < git_diff_num_deltas(diff); i++) {
++		delta = git_diff_get_delta(diff, i);
++
++		if (strcmp(delta->new_file.path, new_path) == 0) {
++			cl_assert_equal_i(status, delta->status);
++			cl_assert_equal_s(old_path, delta->old_file.path);
++			cl_assert_equal_i(similarity, delta->similarity);
++			return;
++		}
++	}
++
++	cl_fail("no delta found for the expected path");
++}
++
++/* Confirm that exact matching does renames beyond rename_limit */
++void test_diff_rename__exact_match_unlimited(void)
++{
++	tree_file old_files[] = {
++		{ "a.txt", CONTENT_A },
++		{ "b.txt", CONTENT_B },
++		{ "c.txt", CONTENT_C },
++	};
++	tree_file new_files[] = {
++		{ "z.txt", CONTENT_C },
++	};
++	git_diff_find_options find_opts = GIT_DIFF_FIND_OPTIONS_INIT;
++	git_diff *diff;
++
++	find_opts.flags = GIT_DIFF_FIND_RENAMES;
++	find_opts.rename_limit = 1;
++
++	diff = diff_trees_find_similar(old_files, ARRAY_SIZE(old_files),
++		new_files, ARRAY_SIZE(new_files), NULL, &find_opts);
++
++	cl_assert_equal_i(3, git_diff_num_deltas(diff));
++	assert_delta(diff, "a.txt", GIT_DELTA_DELETED, "a.txt", 0);
++	assert_delta(diff, "b.txt", GIT_DELTA_DELETED, "b.txt", 0);
++	assert_delta(diff, "z.txt", GIT_DELTA_RENAMED, "c.txt", 100);
++
++	git_diff_free(diff);
++}
++
++/* Files with identical content are renamed one to one, in path order */
++void test_diff_rename__exact_match_duplicate_content(void)
++{
++	tree_file old_files[] = {
++		{ "a1.txt", CONTENT_A },
++		{ "a2.txt", CONTENT_A },
++	};
++	tree_file new_files[] = {
++		{ "b1.txt", CONTENT_A },
++		{ "b2.txt", CONTENT_A },
++	};
++	git_diff_find_options find_opts = GIT_DIFF_FIND_OPTIONS_INIT;
++	git_diff *diff;
++
++	find_opts.flags = GIT_DIFF_FIND_RENAMES;
++
++	diff = diff_trees_find_similar(old_files, ARRAY_SIZE(old_files),
++		new_files, ARRAY_SIZE(new_files), NULL, &find_opts);
++
++	cl_assert_equal_i(2, git_diff_num_deltas(diff));
++	assert_delta(diff, "b1.txt", GIT_DELTA_RENAMED, "a1.txt", 100);
++	assert_delta(diff, "b2.txt", GIT_DELTA_RENAMED, "a2.txt", 100);
++
++	git_diff_free(diff);
++}
++
++/* Several identical new files are all copies of an unmodified source */
++void test_diff_rename__exact_match_with_copies(void)
++{
++	tree_file old_files[] = {
++		{ "src.txt", CONTENT_A },
++	};
++	tree_file new_files[] = {
++		{ "c1.txt", CONTENT_A },
++		{ "c2.txt", CONTENT_A },
++		{ "src.txt", CONTENT_A },
++	};
++	git_diff_options diff_opts = GIT_DIFF_OPTIONS_INIT;
++	git_diff_find_options find_opts = GIT_DIFF_FIND_OPTIONS_INIT;
++	git_diff *diff;
++
++	diff_opts.flags = GIT_DIFF_INCLUDE_UNMODIFIED;
++	find_opts.flags = GIT_DIFF_FIND_COPIES_FROM_UNMODIFIED;
++
++	diff = diff_trees_find_similar(old_files, ARRAY_SIZE(old_files),
++		new_files, ARRAY_SIZE(new_files), &diff_opts, &find_opts);
++
++	cl_assert_equal_i(3, git_diff_num_deltas(diff));
++	assert_delta(diff, "c1.txt", GIT_DELTA_COPIED, "src.txt", 100);
++	assert_delta(diff, "c2.txt", GIT_DELTA_COPIED, "src.txt", 100);
++	assert_delta(diff, "src.txt", GIT_DELTA_UNMODIFIED, "src.txt", 0);
++
++	git_diff_free(diff);
++}
+-- 
+2.56.0
+

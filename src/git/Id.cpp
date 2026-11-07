@@ -11,20 +11,21 @@
 //
 
 #include "Id.h"
+#include <git2/version.h>
 #include <QHash>
 #include <cstring>
 
 namespace git {
 
 Id::Id() {
-#ifdef GIT_EXPERIMENTAL_SHA256
+#if LIBGIT2_VERSION_CHECK(2, 0, 0)
   d.type = 0;
 #endif
   memset(d.id, 0, GIT_OID_MAX_SIZE);
 }
 
 Id::Id(const QByteArray &id, git_oid_t type) {
-#ifdef GIT_EXPERIMENTAL_SHA256
+#if LIBGIT2_VERSION_CHECK(2, 0, 0)
   git_oid_from_raw(&d, reinterpret_cast<const unsigned char *>(id.constData()),
                    type);
 #else
@@ -38,7 +39,7 @@ Id::Id(const git_oid *id) {
   if (id) {
     git_oid_cpy(&d, id);
   } else {
-#ifdef GIT_EXPERIMENTAL_SHA256
+#if LIBGIT2_VERSION_CHECK(2, 0, 0)
     d.type = 0;
 #endif
     memset(d.id, 0, GIT_OID_MAX_SIZE);
@@ -65,7 +66,7 @@ bool Id::operator==(const Id &rhs) const { return git_oid_equal(&d, rhs); }
 bool Id::operator!=(const Id &rhs) const { return !git_oid_equal(&d, rhs); }
 
 uint8_t Id::getSize() const {
-#ifdef GIT_EXPERIMENTAL_SHA256
+#if LIBGIT2_VERSION_CHECK(2, 0, 0)
   return Id::getSize(static_cast<git_oid_t>(d.type));
 #else
   return GIT_OID_SHA1_SIZE;
@@ -74,7 +75,7 @@ uint8_t Id::getSize() const {
 
 uint8_t Id::getSize(const git_oid_t type) {
   switch (type) {
-#ifdef GIT_EXPERIMENTAL_SHA256
+#if LIBGIT2_VERSION_CHECK(2, 0, 0)
     case GIT_OID_SHA256:
       return GIT_OID_SHA256_SIZE;
 #endif

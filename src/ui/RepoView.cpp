@@ -3098,7 +3098,8 @@ git::Commit RepoView::nextRevision(const QString &path) const {
   git::RevWalk walker =
       ref.walker(GIT_SORT_TOPOLOGICAL | GIT_SORT_TIME | GIT_SORT_REVERSE);
   walker.hide(commits.first());
-  return walker.next(path);
+  walker.setPathspec(path);
+  return walker.next();
 }
 
 git::Commit RepoView::previousRevision(const QString &path) const {
@@ -3110,13 +3111,17 @@ git::Commit RepoView::previousRevision(const QString &path) const {
       return git::Commit();
 
     git::RevWalk walker = ref.walker(GIT_SORT_TOPOLOGICAL | GIT_SORT_TIME);
-    return walker.next(path);
+    walker.setPathspec(path);
+    return walker.next();
   }
 
   git::Commit commit = commits.last();
   git::RevWalk walker = commit.walker(GIT_SORT_TOPOLOGICAL | GIT_SORT_TIME);
-  walker.next();
-  return walker.next(path);
+  walker.setPathspec(path);
+
+  // The walk starts at the selected commit, which comes first if it matches.
+  git::Commit previous = walker.next();
+  return previous == commit ? walker.next() : previous;
 }
 
 void RepoView::selectCommit(const git::Commit &commit, const QString &file) {

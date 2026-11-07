@@ -1,0 +1,539 @@
+From 6f6696f8b2352497f8f158211c3cdcc65c343f92 Mon Sep 17 00:00:00 2001
+From: Sven Over <sven@svenover.de>
+Date: Fri, 9 Oct 2026 19:00:31 +0100
+Subject: [PATCH 1/2] revwalk: start limited walks from the newest commits
+
+A walk with hidden commits (a "limited" walk) looks at commits in the
+order of a list that starts out with the commits it was given, and stops
+once only uninteresting commits are left in it. That list was in the
+order the commits were added to the walk, the most recently added first.
+So when a caller pushes the commits it wants and then hides others, the
+walk starts with the hidden commits, and follows their history until it
+gets to the commits it is meant to show.
+
+That's how pushing sets up its walk: it pushes the commits to send, then
+hides every reference the remote advertises. The local transport's fetch
+does the same with the references of the repository it fetches into. In
+a large repository with many references, the walk then goes through a
+lot of history before it even looks at the commits to send.
+
+Sort the commits a limited walk starts from by date, newest first, as
+git does (in prepare_revision_walk). The walk then starts with the
+commits to show, and stops shortly after them. Walks without hidden
+commits keep their order, which fetch negotiation relies on.
+
+Measured with a clone of llvm-project, walking from a new commit on top
+of main while hiding all 1569 references GitHub advertises for it (as
+pushing does): 17.1s before, 0.03s after.
+---
+ src/libgit2/revwalk.c         | 48 ++++++++++++++++++++++++++++++++++-
+ tests/libgit2/revwalk/basic.c | 41 ++++++++++++++++++++++++++++++
+ 2 files changed, 88 insertions(+), 1 deletion(-)
+
+diff --git a/src/libgit2/revwalk.c b/src/libgit2/revwalk.c
+index 1e28009..d0a6389 100644
+--- a/src/libgit2/revwalk.c
++++ b/src/libgit2/revwalk.c
+@@ -948,13 +948,59 @@ static int prepare_incremental_toposort_walk(git_revwalk *walk,
+ 	return 0;
+ }
+ 
++/*
++ * Sort the commits a limited walk starts from by date, newest first, like
++ * git does. Limiting goes on as long as interesting commits are left to
++ * look at: if the commits to show came after the commits to hide (e.g.
++ * many of them, like a remote's advertised references), we would walk the
++ * history of the hidden ones until we got there, however far that goes.
++ */
++static int sort_by_date(git_commit_list **list)
++{
++	git_vector commits = GIT_VECTOR_INIT;
++	git_commit_list *item, *sorted = NULL, **p = &sorted;
++	git_commit_list_node *commit;
++	size_t i;
++	int error;
++
++	if ((error = git_vector_init(&commits, 0, git_commit_list_time_cmp)) < 0)
++		return error;
++
++	for (item = *list; item; item = item->next) {
++		if ((error = git_vector_insert(&commits, item->item)) < 0)
++			goto done;
++	}
++
++	git_vector_sort(&commits);
++
++	git_vector_foreach(&commits, i, commit) {
++		if ((item = git_commit_list_insert(commit, p)) == NULL) {
++			error = -1;
++			goto done;
++		}
++
++		p = &item->next;
++	}
++
++	git_commit_list_free(list);
++	*list = sorted;
++	sorted = NULL;
++
++done:
++	git_commit_list_free(&sorted);
++	git_vector_dispose(&commits);
++	return error;
++}
++
+ /* Prepare revwalk without using generation number */
+ static int prepare_full_walk(git_revwalk *walk, git_commit_list *commits)
+ {
+ 	git_commit_list *list;
+ 	int error = 0;
+ 
+-	if (walk->limited && (error = limit_list(&commits, walk, commits)) < 0)
++	if (walk->limited &&
++	    ((error = sort_by_date(&commits)) < 0 ||
++	     (error = limit_list(&commits, walk, commits)) < 0))
+ 		return error;
+ 
+ 	if (walk->sorting & GIT_SORT_TOPOLOGICAL) {
+diff --git a/tests/libgit2/revwalk/basic.c b/tests/libgit2/revwalk/basic.c
+index 920afc7..421a52a 100644
+--- a/tests/libgit2/revwalk/basic.c
++++ b/tests/libgit2/revwalk/basic.c
+@@ -648,3 +648,44 @@ void test_revwalk_basic__newer_hidden_commit_hides_old_commits(void)
+ 
+ 	cl_git_fail_with(GIT_ITEROVER, git_revwalk_next(&oid, _walk));
+ }
++
++/*
++ * A walk with hidden commits looks at the newest commits first, and stops
++ * once only hidden commits are left, no matter in which order commits
++ * were pushed and hidden. Here, it doesn't look at the parent of an old
++ * hidden commit (which doesn't even exist).
++ *
++ * % git rev-list a65fedf ^be3563a
++ * a65fedf39aefe402d3bb6e24df4d4f5fe4547750
++ */
++void test_revwalk_basic__hidden_commits_walked_from_newest(void)
++{
++	const char *old_commit =
++		"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n"
++		"parent 0123456789012345678901234567890123456789\n"
++		"author A U Thor <author@example.com> 0 +0000\n"
++		"committer A U Thor <author@example.com> 0 +0000\n"
++		"\n"
++		"an old commit whose parent doesn't exist\n";
++	git_oid old_id, oid;
++	git_odb *odb;
++
++	revwalk_basic_setup_walk("testrepo.git");
++
++	cl_git_pass(git_repository_odb(&odb, _repo));
++	cl_git_pass(git_odb_write(&old_id, odb, old_commit,
++		strlen(old_commit), GIT_OBJECT_COMMIT));
++	git_odb_free(odb);
++
++	cl_git_pass(git_oid_from_string(&oid, "a65fedf39aefe402d3bb6e24df4d4f5fe4547750", GIT_OID_SHA1));
++	cl_git_pass(git_revwalk_push(_walk, &oid));
++	cl_git_pass(git_oid_from_string(&oid, "be3563ae3f795b2b4353bcce3a527ad0a4f7f644", GIT_OID_SHA1));
++	cl_git_pass(git_revwalk_hide(_walk, &oid));
++	cl_git_pass(git_revwalk_hide(_walk, &old_id));
++
++	cl_git_pass(git_revwalk_next(&oid, _walk));
++	cl_assert(!git_oid_streq(&oid, "a65fedf39aefe402d3bb6e24df4d4f5fe4547750"));
++
++	cl_git_fail_with(GIT_ITEROVER, git_revwalk_next(&oid, _walk));
++}
++
+-- 
+2.55.0
+
+
+From a966f99dc28c7f7749b7bd0b7dd85f7b42cf2612 Mon Sep 17 00:00:00 2001
+From: Sven Over <sven@svenover.de>
+Date: Fri, 9 Oct 2026 19:00:44 +0100
+Subject: [PATCH 2/2] packbuilder: mark only the edges of a walk uninteresting
+
+git_packbuilder_insert_walk() marked the tree of every hidden commit of
+the walk uninteresting, reading each of those trees in full. When
+pushing, the hidden commits are all the references the remote advertises
+that exist locally. In a large repository, that means reading the large
+trees of many commits, however few objects end up in the pack: pushing a
+single commit to a clone of llvm-project (with 1569 advertised
+references, and trees of about 150,000 files) took about a minute, and
+GitHub gives up on pushes after 30 seconds.
+
+Like git, and as a TODO in insert_walk suggested, only mark the trees of
+the hidden parents of the inserted commits, the edges of the walk. They
+have to be found while walking, as the walk resets when it ends.
+
+This changes which objects end up in the pack in two ways:
+
+ - Objects the receiving side only has through hidden commits that are
+   not edges are inserted again, e.g. after cherry-picking a change from
+   another branch. These are bounded by what the inserted commits change.
+
+ - In walks across merges, the hidden parents of commits from a merged
+   branch are now marked, too, not just the commits hidden explicitly, so
+   their objects aren't inserted needlessly.
+
+Measured with a clone of llvm-project, inserting the walk from new
+commits on top of main while hiding all 1569 references GitHub
+advertises for it (as pushing does):
+
+ scenario                     objects   before   this alone   with the
+                                                              revwalk fix
+ 1 commit                     3         58.7s    17.8s        0.39s
+ 10 commits                   60        58.4s    18.0s        0.41s
+ rebased branch (3 commits)   16 -> 18  57.8s    18.0s        0.38s
+ merge (old branch head and   6         58.0s    18.3s        0.56s
+   main as parents)
+ cherry-pick from a release   5 -> 6    58.2s    17.8s        0.37s
+   branch
+
+In each case, the objects inserted are those git sends (git rev-list
+--objects), and the pack completes the pushed commits on a receiving
+side that has the advertised references.
+---
+ include/git2/pack.h              |   7 ++
+ src/libgit2/pack-objects.c       |  77 +++++++++----
+ tests/libgit2/pack/packbuilder.c | 184 +++++++++++++++++++++++++++++++
+ 3 files changed, 244 insertions(+), 24 deletions(-)
+
+diff --git a/include/git2/pack.h b/include/git2/pack.h
+index 768b4ca..d99da9f 100644
+--- a/include/git2/pack.h
++++ b/include/git2/pack.h
+@@ -121,6 +121,13 @@ GIT_EXTERN(int) git_packbuilder_insert_commit(git_packbuilder *pb, const git_oid
+  * Those commits and all objects they reference will be inserted into
+  * the packbuilder.
+  *
++ * The commits hidden from the walk (see `git_revwalk_hide`) are taken
++ * to be those the receiving side has: objects referenced by the hidden
++ * parents of the inserted commits are not inserted. Like git, this only
++ * looks at those parents, not at all hidden commits, so objects that
++ * the receiving side only has through other hidden commits (e.g. after
++ * cherry-picking a change from another branch) may still be inserted.
++ *
+  * @param pb the packbuilder
+  * @param walk the revwalk to use to fill the packbuilder
+  *
+diff --git a/src/libgit2/pack-objects.c b/src/libgit2/pack-objects.c
+index d540795..583ae4b 100644
+--- a/src/libgit2/pack-objects.c
++++ b/src/libgit2/pack-objects.c
+@@ -1676,21 +1676,37 @@ cleanup:
+ }
+ 
+ /*
+- * Mark the edges of the graph uninteresting. Since we start from a
+- * git_revwalk, the commits are already uninteresting, but we need to
+- * mark the trees and blobs.
++ * Mark the trees of the uninteresting parents of the given commit (one
++ * that is inserted) uninteresting: these commits are the edges of the
++ * walk, the other side has them and everything they reference. Like git,
++ * we only look at the edges rather than at all the uninteresting commits
++ * the walk started from: their trees may be many and large (e.g. one for
++ * every reference a remote advertises), and marking them all would read
++ * each of them in full, no matter how few objects end up in the pack.
++ * The flip side is that an object the other side only has through an
++ * uninteresting commit that is not an edge (e.g. after cherry-picking a
++ * change from another branch) is inserted again.
+  */
+-static int mark_edges_uninteresting(git_packbuilder *pb, git_commit_list *commits)
++static int mark_edge_parents_uninteresting(
++	git_packbuilder *pb,
++	git_revwalk *walk,
++	const git_oid *id)
+ {
+-	int error;
+-	git_commit_list *list;
++	git_commit_list_node *node, *parent;
+ 	git_commit *commit;
++	uint16_t i;
++	int error;
+ 
+-	for (list = commits; list; list = list->next) {
+-		if (!list->item->uninteresting)
++	if ((node = git_revwalk__commit_lookup(walk, id)) == NULL)
++		return -1;
++
++	for (i = 0; i < node->out_degree; i++) {
++		parent = node->parents[i];
++
++		if (!parent->uninteresting)
+ 			continue;
+ 
+-		if ((error = git_commit_lookup(&commit, pb->repo, &list->item->oid)) < 0)
++		if ((error = git_commit_lookup(&commit, pb->repo, &parent->oid)) < 0)
+ 			return error;
+ 
+ 		error = mark_tree_uninteresting(pb, git_commit_tree_id(commit));
+@@ -1784,38 +1800,51 @@ cleanup:
+ 
+ int git_packbuilder_insert_walk(git_packbuilder *pb, git_revwalk *walk)
+ {
+-	int error;
+-	git_oid id;
++	git_array_t(git_oid) commits = GIT_ARRAY_INIT;
++	git_oid id, *commit_id;
+ 	struct walk_object *obj;
++	size_t i;
++	int error;
+ 
+ 	GIT_ASSERT_ARG(pb);
+ 	GIT_ASSERT_ARG(walk);
+ 
+-	if ((error = mark_edges_uninteresting(pb, walk->user_input)) < 0)
+-		return error;
+-
+ 	/*
+-	 * TODO: git marks the parents of the edges
+-	 * uninteresting. This may provide a speed advantage, but does
+-	 * seem to assume the remote does not have a single-commit
+-	 * history on the other end.
++	 * Walk first, marking what the edges reference uninteresting before
++	 * inserting anything. This has to happen during the walk: when it
++	 * ends, the walk resets, and forgets which commits are uninteresting.
+ 	 */
++	while ((error = git_revwalk_next(&id, walk)) == 0) {
++		if ((commit_id = git_array_alloc(commits)) == NULL) {
++			error = -1;
++			goto done;
++		}
++
++		git_oid_cpy(commit_id, &id);
++
++		if ((error = mark_edge_parents_uninteresting(pb, walk, &id)) < 0)
++			goto done;
++	}
++
++	if (error != GIT_ITEROVER)
++		goto done;
+ 
+ 	/* walk down each tree up to the blobs and insert them, stopping when uninteresting */
+-	while ((error = git_revwalk_next(&id, walk)) == 0) {
+-		if ((error = retrieve_object(&obj, pb, &id)) < 0)
+-			return error;
++	git_array_foreach(commits, i, commit_id) {
++		if ((error = retrieve_object(&obj, pb, commit_id)) < 0)
++			goto done;
+ 
+ 		if (obj->seen || obj->uninteresting)
+ 			continue;
+ 
+ 		if ((error = pack_objects_insert_commit(pb, obj)) < 0)
+-			return error;
++			goto done;
+ 	}
+ 
+-	if (error == GIT_ITEROVER)
+-		error = 0;
++	error = 0;
+ 
++done:
++	git_array_dispose(commits);
+ 	return error;
+ }
+ 
+diff --git a/tests/libgit2/pack/packbuilder.c b/tests/libgit2/pack/packbuilder.c
+index 4657954..7f6bc73 100644
+--- a/tests/libgit2/pack/packbuilder.c
++++ b/tests/libgit2/pack/packbuilder.c
+@@ -1,6 +1,7 @@
+ #include "clar_libgit2.h"
+ #include "futils.h"
+ #include "pack.h"
++#include "pack-objects.h"
+ #include "hash.h"
+ #include "iterator.h"
+ #include "vector.h"
+@@ -289,3 +290,186 @@ void test_pack_packbuilder__keep_file_check(void)
+ 	cl_git_pass(git_libgit2_opts(GIT_OPT_DISABLE_PACK_KEEP_FILE_CHECKS, true));
+ 	assert(git_disable_pack_keep_file_checks);
+ }
++
++static void oid_set_add(git_array_oid_t *set, const git_oid *id)
++{
++	git_oid *existing;
++	size_t i;
++
++	git_array_foreach(*set, i, existing) {
++		if (git_oid_equal(existing, id))
++			return;
++	}
++
++	cl_assert((existing = git_array_alloc(*set)) != NULL);
++	git_oid_cpy(existing, id);
++}
++
++static bool oid_set_contains(git_array_oid_t *set, const git_oid *id)
++{
++	git_oid *existing;
++	size_t i;
++
++	git_array_foreach(*set, i, existing) {
++		if (git_oid_equal(existing, id))
++			return true;
++	}
++
++	return false;
++}
++
++static void add_tree_objects(git_array_oid_t *set, const git_oid *tree_id)
++{
++	git_tree *tree;
++	size_t i;
++
++	oid_set_add(set, tree_id);
++	cl_git_pass(git_tree_lookup(&tree, _repo, tree_id));
++
++	for (i = 0; i < git_tree_entrycount(tree); i++) {
++		const git_tree_entry *entry = git_tree_entry_byindex(tree, i);
++
++		if (git_tree_entry_type(entry) == GIT_OBJECT_TREE)
++			add_tree_objects(set, git_tree_entry_id(entry));
++		else if (git_tree_entry_type(entry) == GIT_OBJECT_BLOB)
++			oid_set_add(set, git_tree_entry_id(entry));
++	}
++
++	git_tree_free(tree);
++}
++
++static void walk_from(git_revwalk *walk, const char **push, const char **hide)
++{
++	git_oid id;
++
++	for (; *push; push++) {
++		cl_git_pass(git_oid_from_string(&id, *push, GIT_OID_SHA1));
++		cl_git_pass(git_revwalk_push(walk, &id));
++	}
++
++	for (; *hide; hide++) {
++		cl_git_pass(git_oid_from_string(&id, *hide, GIT_OID_SHA1));
++		cl_git_pass(git_revwalk_hide(walk, &id));
++	}
++}
++
++/*
++ * Check that inserting the walk from the `push` commits, hiding the
++ * `hide` commits, inserts exactly the commits of the walk and the objects
++ * they reference, except for the objects of the hidden parents of those
++ * commits (the edges of the walk), which the other side has.
++ */
++static void assert_insert_walk(const char **push, const char **hide)
++{
++	git_array_oid_t commits = GIT_ARRAY_INIT, objects = GIT_ARRAY_INIT,
++		edges = GIT_ARRAY_INIT, expected = GIT_ARRAY_INIT;
++	git_revwalk *walk;
++	git_commit *commit;
++	git_oid id, *object;
++	size_t i, j;
++
++	/* What to expect, worked out with a separate walk */
++	cl_git_pass(git_revwalk_new(&walk, _repo));
++	walk_from(walk, push, hide);
++
++	while (git_revwalk_next(&id, walk) == 0)
++		oid_set_add(&commits, &id);
++
++	git_revwalk_free(walk);
++
++	git_array_foreach(commits, i, object) {
++		cl_git_pass(git_commit_lookup(&commit, _repo, object));
++		oid_set_add(&objects, object);
++		add_tree_objects(&objects, git_commit_tree_id(commit));
++
++		for (j = 0; j < git_commit_parentcount(commit); j++) {
++			const git_oid *parent_id = git_commit_parent_id(commit, j);
++			git_commit *parent;
++
++			if (oid_set_contains(&commits, parent_id))
++				continue;
++
++			cl_git_pass(git_commit_lookup(&parent, _repo, parent_id));
++			add_tree_objects(&edges, git_commit_tree_id(parent));
++			git_commit_free(parent);
++		}
++
++		git_commit_free(commit);
++	}
++
++	git_array_foreach(objects, i, object) {
++		if (!oid_set_contains(&edges, object))
++			oid_set_add(&expected, object);
++	}
++
++	/* What gets inserted */
++	walk_from(_revwalker, push, hide);
++	cl_git_pass(git_packbuilder_insert_walk(_packbuilder, _revwalker));
++
++	cl_assert_equal_sz(git_array_size(expected), _packbuilder->nr_objects);
++	for (i = 0; i < _packbuilder->nr_objects; i++)
++		cl_assert(oid_set_contains(&expected, &_packbuilder->object_list[i].id));
++
++	git_array_dispose(commits);
++	git_array_dispose(objects);
++	git_array_dispose(edges);
++	git_array_dispose(expected);
++}
++
++void test_pack_packbuilder__insert_walk_omits_objects_of_hidden_parents(void)
++{
++	/* "Add some files into subdirectories", on top of "branch commit one" */
++	const char *push[] = { "763d71aadf09a7951596c9746c024e7eece7c7af", NULL };
++	const char *hide[] = { "c47800c7266a2be04c571c04d5a6614691ea99bd", NULL };
++
++	assert_insert_walk(push, hide);
++}
++
++void test_pack_packbuilder__insert_walk_with_merges(void)
++{
++	/*
++	 * The walk includes the merge be3563a and, from the merged branch,
++	 * c47800c: the hidden 9fd738e and 5b5b025 are their parents.
++	 */
++	const char *push[] = { "a65fedf39aefe402d3bb6e24df4d4f5fe4547750", NULL };
++	const char *hide[] = { "9fd738e8f7967c078dceed8190330fc8648ee56a", NULL };
++
++	assert_insert_walk(push, hide);
++}
++
++void test_pack_packbuilder__insert_walk_reads_only_hidden_parents(void)
++{
++	/*
++	 * Hidden commits that aren't parents of the inserted commits have no
++	 * influence on what gets inserted, and aren't read beyond what the
++	 * walk needs: here, one of them refers to a tree that doesn't exist.
++	 * (There may be many of them, e.g. one for every reference a remote
++	 * advertises, with large trees.)
++	 */
++	const char *broken_commit =
++		"tree 0123456789012345678901234567890123456789\n"
++		"author A U Thor <author@example.com> 1700000000 +0000\n"
++		"committer A U Thor <author@example.com> 1700000000 +0000\n"
++		"\n"
++		"refers to a tree that doesn't exist\n";
++	char broken_id[GIT_OID_SHA1_HEXSIZE + 1];
++	const char *push[] = { "763d71aadf09a7951596c9746c024e7eece7c7af", NULL };
++	const char *hide[] = {
++		"c47800c7266a2be04c571c04d5a6614691ea99bd",
++		/* "Test commit 2", on another branch */
++		"e90810b8df3e80c413d903f631643c716887138d",
++		broken_id,
++		NULL
++	};
++	git_odb *odb;
++	git_oid id;
++
++	cl_git_pass(git_repository_odb(&odb, _repo));
++	cl_git_pass(git_odb_write(&id, odb, broken_commit,
++		strlen(broken_commit), GIT_OBJECT_COMMIT));
++	git_odb_free(odb);
++	git_oid_tostr(broken_id, sizeof(broken_id), &id);
++
++	assert_insert_walk(push, hide);
++}
++
+-- 
+2.55.0
+
