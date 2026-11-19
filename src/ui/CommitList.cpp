@@ -160,6 +160,11 @@ public:
       bool ignoreWhitespace = Settings::instance()->isWhitespaceIgnored();
       return mRepo.status(mRepo.index(), &mStatusCallbacks, ignoreWhitespace);
     }));
+
+    // Show the history with a "checking" status row instead of an empty list
+    // while the status runs, since it can take seconds in large workdirs.
+    if (mRows.isEmpty() && !mReset.isRunning())
+      dispatchResetWalker(false);
   }
 
   void cancelStatus() {
